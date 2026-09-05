@@ -455,6 +455,55 @@ def seed_default_departments(db_path: Path | None = None) -> int:
     return inserted
 
 
+def backfill_missing_departments(db_path: Path | None = None) -> int:
+    """Insert any DEFAULT_DEPARTMENTS row whose slug isn't already present.
+
+    Unlike ``seed_default_departments`` (one-time, sentinel-gated), this is
+    safe to run any number of times: it never touches an existing row, never
+    reads or writes ``departments_meta``, and only inserts slugs missing from
+    the table. Intended for the case where DEFAULT_DEPARTMENTS gains new
+    entries (e.g. new specialists) after a database has already passed its
+    one-time seed. Returns the number of rows inserted.
+    """
+    now = _now()
+    inserted = 0
+    with _get_conn(db_path) as conn:
+        existing_slugs = {
+            row["slug"] for row in conn.execute("SELECT slug FROM departments").fetchall()
+        }
+        for slug, title, specialist_key, charter in DEFAULT_DEPARTMENTS:
+            if slug in existing_slugs:
+                continue
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO departments
+                  (slug, title, specialist_key,
+                   charter_mission, charter_scope_json, charter_out_of_scope_json,
+                   authority_level, cadences_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    slug,
+                    title,
+                    specialist_key,
+                    charter.mission,
+                    json.dumps(charter.scope),
+                    json.dumps(charter.out_of_scope),
+                    AuthorityLevel.PROPOSE_ONLY.value,
+                    json.dumps({"check_in": DEFAULT_CHECK_IN_CADENCE}),
+                    now,
+                ),
+            )
+            if cursor.rowcount:
+                inserted += 1
+    if inserted:
+        logger.info("departments.backfill inserted=%d", inserted)
+        from openexecutive.departments.registry import invalidate
+
+        invalidate()
+    return inserted
+
+
 # --------------------------------------------------------------------------- #
 # Department CRUD
 # --------------------------------------------------------------------------- #

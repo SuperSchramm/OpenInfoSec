@@ -18,6 +18,9 @@ from openexecutive.agents.product import ProductAgent
 from openexecutive.agents.strategy import StrategyAgent
 from openexecutive.agents.talent import TalentAgent
 from openexecutive.agents.triage import TriageAgent
+from openexecutive.agents.ciso import CISOAgent
+from openexecutive.agents.cyberops import CyberOpsAgent
+from openexecutive.agents.grc import GRCAgent
 
 SPECIALIST_REGISTRY: dict[str, BaseAgent] = {
     "cso": StrategyAgent(),
@@ -27,6 +30,9 @@ SPECIALIST_REGISTRY: dict[str, BaseAgent] = {
     "coo": OperationsAgent(),
     "cmo": MarketingAgent(),
     "cpo": ProductAgent(),
+    "ciso": CISOAgent(),
+    "cyberops": CyberOpsAgent(),
+    "grc": GRCAgent(),
     "board_comms": BoardCommsAgent(),
     "talent": TalentAgent(),
     "triage": TriageAgent(),
@@ -41,6 +47,9 @@ SPECIALIST_DESCRIPTIONS = {
     "cmo": "Chief Marketing Officer — GTM strategy, brand, messaging, PR, crisis communications",
     "cpo": "Chief Product Officer — product roadmap, prioritization frameworks, product strategy",
     "board_comms": "Board Communications Director — board decks, investor relations, governance",
+    "ciso": "Chief Information Security Officer — security strategy, risk posture, board reporting, cross-domain security governance",
+    "cyberops": "Director of Cyber Operations — SOC/IR, threat detection, OT/ICS security, vulnerability management, incident response",
+    "grc": "Director of Governance, Risk & Compliance — framework mapping, audit prep, policy, regulatory compliance",
     "talent": "Head of Talent & Executive Search — candidate screening & fit scoring, executive sourcing, energy-sector talent-market mapping",
     "triage": "Chief of Staff — evaluates inbound events (email/Slack/docs) for significance and decides alerting",
 }

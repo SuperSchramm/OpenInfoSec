@@ -95,6 +95,7 @@ function auditAuth(
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
+  trustHost: true,
   // 24h JWT TTL. Defence in depth alongside the `authorized` re-check
   // below — a session that somehow drifts out of sync with the roster
   // is corrected on next access, but also naturally expires within a

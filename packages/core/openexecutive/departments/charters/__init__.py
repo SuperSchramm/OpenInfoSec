@@ -57,6 +57,18 @@ OPERATIONS_CHARTER = _stub(
 MARKETING_CHARTER = _stub(
     "Own GTM strategy, brand, messaging, PR, and crisis communications."
 )
+CISO_CHARTER = _stub(
+    "Own enterprise security strategy, risk posture, and board-level "
+    "security reporting across IT/OT environments."
+)
+CYBEROPS_CHARTER = _stub(
+    "Run security operations: threat detection, incident response, "
+    "vulnerability management, and OT/ICS operational security."
+)
+GRC_CHARTER = _stub(
+    "Own governance, risk, and compliance: framework mapping, audit "
+    "preparation, policy management, and regulatory obligations."
+)
 PRODUCT_CHARTER = _stub(
     "Own the product roadmap, prioritization frameworks, and product strategy."
 )
@@ -73,6 +85,9 @@ DEFAULT_DEPARTMENTS: tuple[tuple[str, str, str, DepartmentCharter], ...] = (
     ("legal", "Legal", "gc", LEGAL_CHARTER),
     ("operations", "Operations", "coo", OPERATIONS_CHARTER),
     ("marketing", "Marketing", "cmo", MARKETING_CHARTER),
+    ("ciso", "Information Security", "ciso", CISO_CHARTER),
+    ("cyberops", "Cyber Operations", "cyberops", CYBEROPS_CHARTER),
+    ("grc", "Governance, Risk & Compliance", "grc", GRC_CHARTER),
     ("product", "Product", "cpo", PRODUCT_CHARTER),
     ("board_comms", "Board & Investor Comms", "board_comms", BOARD_COMMS_CHARTER),
 )

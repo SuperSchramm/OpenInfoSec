@@ -21,6 +21,9 @@ DOMAIN_MAP: dict[str, str] = {
     "marketing": "marketing",
     "board": "board",
     "product": "product",
+    "security": "security",
+    "governance": "governance",
+    "compliance": "compliance",
 }
 
 
