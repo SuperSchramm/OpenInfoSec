@@ -63,6 +63,24 @@ class Settings(BaseSettings):
     # Set RESEARCH_MODEL=claude-opus-4-7 to restore the prior behavior.
     research_model: str = Field("claude-sonnet-4-6", alias="RESEARCH_MODEL")
 
+    # Model for the Executive orchestrator's own reasoning — routing and
+    # tool-dispatch judgment (which specialists to consult, whether to run
+    # Committee review, the final synthesis call). Separate from
+    # DEFAULT_MODEL, which governs the non-security department agents
+    # (finance, marketing, etc). Empty string means "unset"; the validator
+    # below falls back to default_model, so a deployment that hasn't set
+    # this explicitly is unaffected. Set explicitly to pin the orchestrator
+    # to a specific model regardless of DEFAULT_MODEL — e.g. when
+    # DEFAULT_MODEL points at a local/non-Claude model for cost or
+    # experimentation, but tool-dispatch judgment should stay on Claude.
+    executive_model: str = Field("", alias="EXECUTIVE_MODEL")
+
+    @model_validator(mode="after")
+    def _resolve_executive_model(self) -> "Settings":
+        if not self.executive_model:
+            self.executive_model = self.default_model
+        return self
+
     vector_store_path: Path = Field(_ROOT / "chroma_db", alias="VECTOR_STORE_PATH")
     company_profile_path: Path = Field(
         _ROOT / "company" / "profile.yaml", alias="COMPANY_PROFILE_PATH"

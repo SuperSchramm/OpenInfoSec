@@ -207,6 +207,32 @@ providers:
 routing:
   pattern: Anthropic tool use with a single `consult_specialist` tool. Multiple parallel tool_use blocks per assistant turn fan out to specialists concurrently.
   parallel_function: openexecutive.orchestrator.router.route_parallel
+  tool_choice: |
+    `_stream_agent_loop` (executive.py) does not run with `tool_choice="auto"`
+    unconditionally. On iteration 1 of a fresh turn only, if
+    `router.plausibly_on_topic(user_message)` matches a keyword against
+    `router.SPECIALIST_KEYWORDS` (one list per specialist domain, `triage`
+    excluded), the call is sent with
+    `tool_choice={"type": "tool", "name": "consult_specialist"}`, forcing a
+    specialist consult before the model can answer from its own general
+    knowledge. Every iteration after the first reverts to unforced "auto" —
+    once the model has made its own tool-use choice (consulted a specialist,
+    called a skill, or started synthesizing), forcing another tool call would
+    prevent the turn from ever finishing with a text answer. This exists
+    because `tool_choice="auto"` alone let any backing model (Claude or a
+    local/OpenRouter model via EXECUTIVE_MODEL) silently skip
+    `consult_specialist` even on squarely on-topic questions — there was
+    previously no system-prompt guidance mandating consultation either (see
+    persona `## Consulting Your Team` and the strengthened tool description
+    in `SPECIALIST_TOOLS[0]["description"]`). The heuristic is a cheap
+    substring gate, not a classifier: a false negative just leaves "auto"
+    behavior, a false positive costs one extra (still cheap) specialist
+    consult. `tool_choice` reaches every provider correctly —
+    `providers/translator.py::_translate_tool_choice` converts the Anthropic
+    `{"type":"tool","name":...}` shape to OpenAI's
+    `{"type":"function","function":{"name":...}}` for OpenRouter/local calls,
+    and `feature_gate.py` only strips `tool_choice` when a model's
+    `FeatureSpec.supports_tool_use` is False (local models keep it True).
   fanout_cap: |
     The number of parallel `consult_specialist` calls dispatched in a single
     turn is bounded by `MAX_PARALLEL_SPECIALISTS` (config). Default 0 is inert

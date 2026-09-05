@@ -9,7 +9,10 @@ from openexecutive.agents.base import BaseAgent
 if TYPE_CHECKING:
     from openexecutive.orchestrator.debug_events import DebugCollector
 from openexecutive.agents.board_comms import BoardCommsAgent
+from openexecutive.agents.ciso import CISOAgent
+from openexecutive.agents.cyberops import CyberOpsAgent
 from openexecutive.agents.finance import FinanceAgent
+from openexecutive.agents.grc import GRCAgent
 from openexecutive.agents.hr_talent import HRAgent
 from openexecutive.agents.legal import LegalAgent
 from openexecutive.agents.marketing import MarketingAgent
@@ -18,9 +21,6 @@ from openexecutive.agents.product import ProductAgent
 from openexecutive.agents.strategy import StrategyAgent
 from openexecutive.agents.talent import TalentAgent
 from openexecutive.agents.triage import TriageAgent
-from openexecutive.agents.ciso import CISOAgent
-from openexecutive.agents.cyberops import CyberOpsAgent
-from openexecutive.agents.grc import GRCAgent
 
 SPECIALIST_REGISTRY: dict[str, BaseAgent] = {
     "cso": StrategyAgent(),
@@ -54,13 +54,77 @@ SPECIALIST_DESCRIPTIONS = {
     "triage": "Chief of Staff — evaluates inbound events (email/Slack/docs) for significance and decides alerting",
 }
 
+
+# Cheap keyword heuristic — does a user message plausibly touch a specialist
+# domain? Used by executive._stream_agent_loop to decide whether to force
+# tool_choice toward `consult_specialist` on the first iteration of a fresh
+# turn. Deliberately conservative in scope (specific multi-word phrases over
+# bare abbreviations where possible) but not in coverage: a false negative
+# just leaves the default "auto" behavior; a false positive costs one extra
+# specialist consult, which is cheap next to a silently ungrounded answer.
+# `triage` is intentionally excluded — it fields inbound events, not
+# something a user asks about directly.
+SPECIALIST_KEYWORDS: dict[str, list[str]] = {
+    "cso": ["competitive strategy", "competitor", "market entry", "acquisition",
+            "merger", "m&a", "positioning", "scenario planning", "okr",
+            "market sizing", "beachhead", "moat"],
+    "cfo": ["budget", "financial model", "cash flow", "runway", "burn rate",
+            "unit economics", "ltv", "cac", "fundraising", "valuation",
+            "cap table", "term sheet", "gross margin", "arr", "investor"],
+    "chro": ["hiring", "compensation", "salary", "equity grant",
+             "performance review", "pip", "org design", "onboarding",
+             "termination", "layoff", "headcount"],
+    "gc": ["contract", "nda", "ip ownership", "trademark", "patent",
+           "lawsuit", "gdpr", "ccpa", "non-compete", "employment law",
+           "indemnif"],
+    "coo": ["vendor", "sla", "operational process", "supply chain",
+            "logistics", "bottleneck", "procurement"],
+    "cmo": ["go-to-market", "gtm", "brand positioning", "messaging",
+            "pr strategy", "crisis communication", "campaign",
+            "demand generation", "nps"],
+    "cpo": ["product roadmap", "product strategy", "prioritization",
+            "rice score", "product-market fit", "pmf", "customer discovery",
+            "build vs buy"],
+    "board_comms": ["board deck", "board meeting", "investor update",
+                     "investor relations", "board member"],
+    "talent": ["candidate", "executive search", "fit score",
+               "screen candidate", "sourcing", "recruit"],
+    "ciso": ["security strategy", "risk register", "risk appetite",
+             "security posture"],
+    "cyberops": ["incident response", "siem", "soc alert", "vulnerability",
+                 "patch", "ransomware", "malware", "phishing", "breach",
+                 "ics security", "ot security"],
+    "grc": ["compliance framework", "soc 2", "iso 27001", "audit prep",
+            "nist", "hipaa", "regulatory obligation", "policy review"],
+}
+
+
+def plausibly_on_topic(user_message: str) -> bool:
+    """True if ``user_message`` plausibly touches a specialist domain.
+
+    Simple case-insensitive substring match against SPECIALIST_KEYWORDS.
+    Not a classifier — a cheap gate for whether to nudge tool use, not a
+    routing decision (the model still picks which specialist(s) to call).
+    """
+    lowered = user_message.lower()
+    return any(
+        keyword in lowered
+        for keywords in SPECIALIST_KEYWORDS.values()
+        for keyword in keywords
+    )
+
+
 SPECIALIST_TOOLS: list[dict[str, Any]] = [
     {
         "name": "consult_specialist",
         "description": (
             "Consult a specialist executive agent for domain-specific analysis. "
             "Use this to get deep expertise from the relevant functional leader. "
-            "You may call this multiple times in parallel for cross-domain questions."
+            "You may call this multiple times in parallel for cross-domain questions. "
+            "Call this proactively whenever the user's question substantively touches "
+            "one of the specialist domains below — do not rely on your own general "
+            "knowledge alone for domain-specific guidance; specialists have "
+            "company-specific context you do not have directly."
         ),
         "input_schema": {
             "type": "object",

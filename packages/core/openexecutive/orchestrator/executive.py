@@ -63,6 +63,7 @@ from openexecutive.orchestrator.research_tools import (
 from openexecutive.orchestrator.router import (
     SPECIALIST_TOOLS,
     partition_specialist_fanout,
+    plausibly_on_topic,
     route_parallel,
 )
 from openexecutive.orchestrator.schedule_tools import (
@@ -522,7 +523,7 @@ class Executive:
         # Wrap in try/except so an override-store outage doesn't block chat.
         persona_override: str | None = None
         voice_persona_body: str | None = None
-        effective_model = self._settings.default_model
+        effective_model = self._settings.executive_model
         try:
             from openexecutive.agents.overrides import (
                 EXECUTIVE_AGENT_ID,
@@ -609,6 +610,7 @@ class Executive:
                 debug_collector=debug_collector,
                 consulted_out=consulted,
                 turn_id=turn_id,
+                user_message=user_message,
             ):
                 if isinstance(item, str) and item != self._THINKING:
                     full_response += item
@@ -730,7 +732,7 @@ class Executive:
 
         persona_override: str | None = None
         voice_persona_body: str | None = None
-        effective_model = self._settings.default_model
+        effective_model = self._settings.executive_model
         try:
             from openexecutive.agents.overrides import (
                 EXECUTIVE_AGENT_ID,
@@ -835,6 +837,7 @@ class Executive:
             consulted_out=consulted,
             specialist_outputs_out=specialist_outputs,
             turn_id=turn_id,
+            user_message=user_message,
         ):
             # Swallow draft text and the THINKING sentinel — the user sees
             # only the revised stream. Pass debug-event dicts through so the
@@ -886,7 +889,7 @@ class Executive:
 
         from openexecutive.orchestrator.committee import Committee
         committee = Committee(
-            reviewer_model=self._settings.default_model,
+            reviewer_model=self._settings.executive_model,
         )
         # Mirror the upcoming review onto the debug stream so the Agent
         # Activity panel shows committee progress alongside the inline
@@ -1108,6 +1111,7 @@ class Executive:
         consulted_out: list[str] | None = None,
         specialist_outputs_out: dict[str, str] | None = None,
         turn_id: str | None = None,
+        user_message: str = "",
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Tool-use loop that yields text deltas as they arrive.
 
@@ -1118,6 +1122,12 @@ class Executive:
         current_messages = list(messages)
         last_full_text = ""
         specialists_consulted: list[str] = []
+        # Computed once per turn — the message doesn't change across
+        # iterations. Only applied on iteration 1 (below): after that the
+        # model has either already consulted a specialist or made its own
+        # choice, and forcing further tool calls during synthesis would
+        # prevent it from ever finishing with a text answer.
+        force_specialist_consult = bool(user_message) and plausibly_on_topic(user_message)
 
         for iteration in range(1, max_iterations + 1):
             logger.info(
@@ -1152,13 +1162,19 @@ class Executive:
             web_search_tool = build_web_search_tool()
             if web_search_tool is not None:
                 tools_with_cache.append(web_search_tool)
-            stream_model = model or self._settings.default_model
+            stream_model = model or self._settings.executive_model
+            tool_choice = (
+                {"type": "tool", "name": "consult_specialist"}
+                if iteration == 1 and force_specialist_consult
+                else None
+            )
             async with get_provider(stream_model).messages_stream(
                 model=stream_model,
                 max_tokens=8192,
                 system=system_blocks,  # type: ignore[arg-type]
                 tools=tools_with_cache,  # type: ignore[arg-type,list-item]
                 messages=current_messages,  # type: ignore[arg-type]
+                **({"tool_choice": tool_choice} if tool_choice else {}),
             ) as stream:
                 async for event in stream:
                     if (
