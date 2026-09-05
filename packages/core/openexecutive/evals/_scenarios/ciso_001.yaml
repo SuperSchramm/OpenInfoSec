@@ -1,0 +1,20 @@
+id: ciso_001
+domain: security
+description: "Board wants a full OT security overhaul with a constrained budget"
+company_context:
+  stage: "Growth"
+  industry: "Manufacturing - Industrial OT"
+  headcount: 850
+query: "The board saw the Jaguar Land Rover attack in the news and now wants a 'full security architecture overhaul' this quarter. We have budget for maybe two of the ten things a consultant put on our list. How do I prioritize, and what do I actually tell the board?"
+expected_topics:
+  - risk_register_prioritization
+  - risk_appetite
+  - it_ot_boundary_priority
+  - board_reporting
+required_routing:
+  - ciso
+quality_criteria:
+  actionable: true
+  gives_clear_recommendation: true
+  frames_business_risk_not_just_technical: true
+  states_board_message: true

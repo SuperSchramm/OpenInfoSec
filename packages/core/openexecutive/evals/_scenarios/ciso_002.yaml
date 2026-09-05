@@ -1,0 +1,20 @@
+id: ciso_002
+domain: security
+description: "Scoping a cloud AI vendor with write-back access to OT historians"
+company_context:
+  stage: "Growth"
+  industry: "Energy - Oil & Gas (Midstream Pipeline)"
+  headcount: 1200
+query: "A predictive-maintenance vendor wants their cloud AI platform to have direct API access to our Level 3 historians, including write-back so it can auto-adjust setpoints when it predicts equipment failure. Sales is pushing hard for this because it's a differentiated feature. From a security architecture standpoint, how do we scope this?"
+expected_topics:
+  - level_6_cloud_tier_governance
+  - ai_governance_taxonomy_class_3
+  - write_back_restriction
+  - conduit_and_security_level_assignment
+required_routing:
+  - ciso
+quality_criteria:
+  actionable: true
+  references_level6_or_ai_governance_framework: true
+  distinguishes_read_only_from_write_back: true
+  gives_clear_recommendation: true

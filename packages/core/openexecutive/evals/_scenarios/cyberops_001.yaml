@@ -1,0 +1,21 @@
+id: cyberops_001
+domain: security
+description: "Critical CVE with public exploit affecting a live HMI workstation"
+company_context:
+  stage: "Growth"
+  industry: "Manufacturing - Industrial OT"
+  headcount: 850
+query: "We just got notified of a critical CVE with a public working exploit affecting the OS on an HMI workstation at one of our production plants. The line is running right now and a patch would require a short shutdown. What's our timeline and how do we sequence this?"
+expected_topics:
+  - exploitation_status_driven_sla
+  - ot_change_window_vs_it_sla
+  - compensating_controls_pending_patch
+  - segmentation_check
+  - shutdown_timing_deferred_to_operations_and_safety
+required_routing:
+  - cyberops
+quality_criteria:
+  actionable: true
+  distinguishes_it_from_ot_handling: true
+  names_specific_next_action_and_order: true
+  gives_verification_signal: true

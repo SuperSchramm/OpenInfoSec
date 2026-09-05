@@ -1,0 +1,20 @@
+id: grc_002
+domain: security
+description: "Board asks whether a passed AWIA assessment covers ransomware risk"
+company_context:
+  stage: "Growth"
+  industry: "Water and Wastewater Utility"
+  headcount: 310
+query: "We just passed our AWIA risk and resilience assessment. The board is asking whether that means we're covered against a ransomware attack like the ones that have hit other water utilities. How do I answer that honestly?"
+expected_topics:
+  - awia_scope_limitations
+  - no_mandated_technical_controls_gap
+  - cloud_and_remote_access_boundary_gap
+  - honest_gap_disclosure_to_board
+required_routing:
+  - grc
+quality_criteria:
+  actionable: true
+  references_cross_framework_gap_or_level6: true
+  does_not_overstate_compliance_as_security: true
+  states_what_evidence_would_satisfy_auditor: true

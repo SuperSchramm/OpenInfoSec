@@ -1,0 +1,20 @@
+id: cyberops_002
+domain: security
+description: "Suspected shadow AI traffic detected on the L2 supervisory network"
+company_context:
+  stage: "Growth"
+  industry: "Energy - Oil & Gas (Midstream Pipeline)"
+  headcount: 1200
+query: "Our DMZ monitoring flagged outbound traffic from an HMI/engineering workstation on the supervisory network that looks like calls to a public LLM API. Nobody on the OT team says they authorized any AI tool there. Walk me through how we respond."
+expected_topics:
+  - shadow_ai_class_4_identification
+  - dmz_behavioral_analysis
+  - containment_before_analysis
+  - approved_tool_registry_gap
+required_routing:
+  - cyberops
+quality_criteria:
+  actionable: true
+  references_ai_governance_taxonomy_or_purdue_level: true
+  prioritizes_containment: true
+  names_specific_next_action_and_order: true

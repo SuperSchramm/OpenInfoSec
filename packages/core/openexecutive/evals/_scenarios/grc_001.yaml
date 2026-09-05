@@ -1,0 +1,20 @@
+id: grc_001
+domain: security
+description: "SOC 2 Type II audit prep with 90 days and open items"
+company_context:
+  stage: "Growth"
+  industry: "Healthcare - Multi-Facility Health System"
+  headcount: 2400
+query: "Our SOC 2 Type II audit window opens in 90 days and we have a dozen open items from the readiness assessment, including a couple of controls that were only implemented last month. What's our approach to closing this out?"
+expected_topics:
+  - evidence_over_verbal_claims
+  - control_operating_period_requirement
+  - control_to_clause_mapping
+  - realistic_remediation_sequencing
+required_routing:
+  - grc
+quality_criteria:
+  actionable: true
+  names_specific_framework_clause: true
+  states_what_evidence_would_satisfy_auditor: true
+  honest_about_which_gaps_wont_close_in_time: true
