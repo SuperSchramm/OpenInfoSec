@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     company_profile_path: Path = Field(
         _ROOT / "company" / "profile.yaml", alias="COMPANY_PROFILE_PATH"
     )
+    # Local-dev escape hatch: seed_builtin_knowledge() no-ops once
+    # BUILTIN_COLLECTION already has rows, so editing/adding a builtin
+    # knowledge doc has no effect against an existing chroma_db until this
+    # is set for one `make dev` startup.
+    force_reseed_knowledge: bool = Field(False, alias="FORCE_RESEED_KNOWLEDGE")
 
     enable_caching: bool = Field(True, alias="ENABLE_CACHING")
 

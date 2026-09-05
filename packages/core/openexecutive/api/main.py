@@ -170,7 +170,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # have no FastAPI Request to reach app.state through.
     mcp_server.set_store(store)
 
-    await seed_builtin_knowledge(store=store)
+    await seed_builtin_knowledge(store=store, force=settings.force_reseed_knowledge)
     await seed_builtin_skills(store=store)
     await seed_failures(store=store)
 

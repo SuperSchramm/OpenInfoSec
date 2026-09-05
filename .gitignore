@@ -25,6 +25,9 @@ packages/core/company/
 # Runtime profile/docs (COMPANY_PROFILE_PATH defaults to repo-root company/)
 company/
 
+# Local source material for knowledge-base authoring — not part of the shipped repo
+docs/source-material/
+
 # Vector store
 *.chroma/
 chroma_db/
