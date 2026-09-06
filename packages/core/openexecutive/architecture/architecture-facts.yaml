@@ -209,25 +209,54 @@ routing:
   parallel_function: openexecutive.orchestrator.router.route_parallel
   tool_choice: |
     `_stream_agent_loop` (executive.py) does not run with `tool_choice="auto"`
-    unconditionally. On iteration 1 of a fresh turn only, if
-    `router.plausibly_on_topic(user_message)` matches a keyword against
-    `router.SPECIALIST_KEYWORDS` (one list per specialist domain, `triage`
-    excluded), the call is sent with
-    `tool_choice={"type": "tool", "name": "consult_specialist"}`, forcing a
-    specialist consult before the model can answer from its own general
-    knowledge. Every iteration after the first reverts to unforced "auto" —
-    once the model has made its own tool-use choice (consulted a specialist,
-    called a skill, or started synthesizing), forcing another tool call would
-    prevent the turn from ever finishing with a text answer. This exists
-    because `tool_choice="auto"` alone let any backing model (Claude or a
-    local/OpenRouter model via EXECUTIVE_MODEL) silently skip
-    `consult_specialist` even on squarely on-topic questions — there was
-    previously no system-prompt guidance mandating consultation either (see
-    persona `## Consulting Your Team` and the strengthened tool description
-    in `SPECIALIST_TOOLS[0]["description"]`). The heuristic is a cheap
-    substring gate, not a classifier: a false negative just leaves "auto"
-    behavior, a false positive costs one extra (still cheap) specialist
-    consult. `tool_choice` reaches every provider correctly —
+    unconditionally. On iteration 1 of a fresh turn only, the call is sent
+    with `tool_choice={"type": "tool", "name": "consult_specialist"}` by
+    DEFAULT — forcing a specialist consult before the model can answer from
+    its own general knowledge — UNLESS `router.is_off_topic(user_message)`
+    matches its narrow allowlist. `is_off_topic` normalizes the whole
+    message (lowercase, strip all punctuation, collapse whitespace) and
+    checks it for EXACT membership in `router._OFF_TOPIC_PHRASES` — a single
+    curated set covering greetings/small talk, meta-questions about the tool
+    itself, and short affirmation/filler replies ("yes", "ok thanks", etc.).
+    This is whole-message exact match, deliberately not a substring/regex
+    search: an earlier version used a regex searched against the raw
+    message and was reverted in the same PR after adversarial review found
+    it (a) false-positived on genuine on-topic questions like "What can you
+    do about the ransomware on our OT segment?", and (b) was reachable by
+    attachment text — `api/routes/chat.py` appends extracted document text
+    into the same `user_message` string before this check runs, so a
+    substring search was scanning content the user never typed. Exact-match
+    on the whole string closes both: any additional real content, whether
+    the user's own elaboration or appended attachment text, breaks the match
+    and correctly falls through to forced. Every iteration after the first
+    reverts to unforced "auto" — once the model has made its own tool-use
+    choice (consulted a specialist, called a skill, or started
+    synthesizing), forcing another tool call would prevent the turn from
+    ever finishing with a text answer.
+    This was inverted from an earlier design that forced only when
+    `router.plausibly_on_topic(user_message)` matched a keyword against
+    `router.SPECIALIST_KEYWORDS`. That design missed real domain-specific
+    queries whose wording didn't happen to hit a keyword — confirmed
+    empirically: an OT/shadow-AI incident query matched zero keywords across
+    all 13 specialists and silently fell back to unforced "auto" on exactly
+    the domain forcing exists to protect. `plausibly_on_topic()` /
+    `SPECIALIST_KEYWORDS` are retained but no longer gate anything — kept as
+    an observability signal only, logged per turn
+    (`logger.info("topic_gate: force=%s plausibly_on_topic=%s ...")`) so
+    keyword-list coverage can still be reviewed/tuned without being
+    load-bearing for correctness. This is a security-adjacent advisory tool:
+    the safe failure direction is over-forcing (a consult that wasn't
+    strictly necessary), not under-forcing (a solo answer on a question that
+    needed one) — but that direction has a real cost/latency tradeoff, not
+    just a hypothetical one: because the allowlist is exact-match, routine
+    short replies not on the curated list ("thanks!" variants not covered,
+    a bare emoji reaction beyond the "normalizes to empty" case, etc.) also
+    force a full specialist round. The list is kept as tight as safety
+    allows and was already widened once after adversarial review flagged
+    high-frequency conversational filler ("yes"/"no"/"sure") falling through
+    to forced — extend it further (in normalized form) rather than loosen
+    the matching strategy back toward substring search.
+    `tool_choice` reaches every provider correctly —
     `providers/translator.py::_translate_tool_choice` converts the Anthropic
     `{"type":"tool","name":...}` shape to OpenAI's
     `{"type":"function","function":{"name":...}}` for OpenRouter/local calls,

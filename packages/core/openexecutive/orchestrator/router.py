@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -56,13 +57,20 @@ SPECIALIST_DESCRIPTIONS = {
 
 
 # Cheap keyword heuristic — does a user message plausibly touch a specialist
-# domain? Used by executive._stream_agent_loop to decide whether to force
-# tool_choice toward `consult_specialist` on the first iteration of a fresh
-# turn. Deliberately conservative in scope (specific multi-word phrases over
-# bare abbreviations where possible) but not in coverage: a false negative
-# just leaves the default "auto" behavior; a false positive costs one extra
-# specialist consult, which is cheap next to a silently ungrounded answer.
-# `triage` is intentionally excluded — it fields inbound events, not
+# domain? NO LONGER gates the forced tool_choice in executive._stream_agent_loop
+# (see is_off_topic() below for that) -- it is a flat OR across every
+# specialist's combined list ("does this match anyone's domain," not "does
+# this match the right domain"), and gating forcing on it missed real
+# domain-specific queries whose wording didn't happen to hit a keyword: an
+# OT/shadow-AI incident query matched zero keywords across all 13
+# specialists and silently fell back to unforced "auto" on exactly the
+# domain forcing exists to protect. Kept as an observability signal only --
+# logged per turn in executive.py so keyword-list coverage can still be
+# reviewed/tuned without being load-bearing for correctness. Broadening a
+# specialist's list here improves that signal's sensitivity; it does not
+# change which specialist the model picks once a consult is forced --
+# that's the model's own judgment inside the tool call, unaffected by this
+# dict. `triage` is intentionally excluded — it fields inbound events, not
 # something a user asks about directly.
 SPECIALIST_KEYWORDS: dict[str, list[str]] = {
     "cso": ["competitive strategy", "competitor", "market entry", "acquisition",
@@ -86,11 +94,14 @@ SPECIALIST_KEYWORDS: dict[str, list[str]] = {
             "rice score", "product-market fit", "pmf", "customer discovery",
             "build vs buy"],
     "board_comms": ["board deck", "board meeting", "investor update",
-                     "investor relations", "board member"],
+                     "investor relations", "board member", "governance structure",
+                     "shareholder"],
     "talent": ["candidate", "executive search", "fit score",
-               "screen candidate", "sourcing", "recruit"],
+               "screen candidate", "sourcing", "recruit", "talent pipeline",
+               "search mandate"],
     "ciso": ["security strategy", "risk register", "risk appetite",
-             "security posture"],
+             "security posture", "security architecture", "security roadmap",
+             "ai governance", "security investment", "security overhaul"],
     "cyberops": ["incident response", "siem", "soc alert", "vulnerability",
                  "patch", "ransomware", "malware", "phishing", "breach",
                  "ics security", "ot security"],
@@ -112,6 +123,106 @@ def plausibly_on_topic(user_message: str) -> bool:
         for keywords in SPECIALIST_KEYWORDS.values()
         for keyword in keywords
     )
+
+
+# Narrow allowlist of message shapes where executive._stream_agent_loop
+# deliberately withholds the forced consult_specialist tool_choice on
+# iteration 1. Everything else forces by default -- the inverse of the old
+# plausibly_on_topic()-gated design (see the SPECIALIST_KEYWORDS comment
+# above for why that design was replaced). This is a security-adjacent
+# advisory tool: the safe failure direction is over-forcing (a consult that
+# wasn't strictly necessary), not under-forcing (a solo answer on a question
+# that needed one), so keep this allowlist narrow and prefer false negatives
+# (falls through to forced) over false positives (wrongly skips forcing).
+#
+# Exact-match on the WHOLE normalized message, deliberately not a
+# prefix/substring regex on either category:
+#   - a greedy prefix like `^(hi|hey)\b.*` would misclassify "Hey, can you
+#     review our NDA terms?" as small talk just because of its opener;
+#   - a substring search for meta-question phrasing (an earlier version of
+#     this function used one) misclassified genuine on-topic questions --
+#     "What can you do about the ransomware on our OT segment?" and "Who
+#     are you recommending we hire as our first CISO?" both contain a
+#     matched substring while being squarely on-topic. Worse, `user_message`
+#     here is the caller's already attachment-augmented text
+#     (api/routes/chat.py appends extracted document text after the user's
+#     own words), so a substring search is scanning content the user didn't
+#     even write -- a boilerplate FAQ line inside an uploaded document could
+#     silently withhold forcing on a real security question.
+# Exact-match-on-the-whole-message closes both: any additional real content,
+# whether the user's own elaboration or appended attachment text, breaks the
+# match and correctly falls through to forced.
+#
+# Normalization (`_normalize`): lowercase, strip everything but letters/
+# digits/whitespace (all punctuation, including apostrophes, so "how's it
+# going" and "hows it going" normalize identically), collapse whitespace.
+# To extend either category below, add the phrase already in that
+# normalized form (lowercase, no punctuation, single spaces).
+_OFF_TOPIC_PHRASES: frozenset[str] = frozenset({
+    # Greetings / small talk
+    "hi", "hello", "hey", "hi there", "hello there", "hey there",
+    "good morning", "good afternoon", "good evening",
+    "hi how are you", "hello how are you", "hey how are you",
+    "how are you", "hows it going", "how are you doing",
+    "thanks", "thank you", "thanks that helps", "thank you that helps",
+    "sounds good", "got it", "ok", "okay", "great", "perfect", "cool",
+    "bye", "goodbye", "see you", "talk soon",
+    # Meta-questions about the tool/orchestrator itself
+    "how do you work", "how does this work", "how does this tool work",
+    "how does this system work", "how does this app work",
+    "how does this assistant work", "what model are you",
+    "what model do you use", "are you an ai", "are you a bot",
+    "are you a chatbot", "what can you do", "who are you",
+    "who made you", "who built you",
+    # Short affirmations / negations / conversational filler. Exact-match
+    # keeps these safe to add: "yes" only matches the literal word "yes",
+    # never "yes, and also patch the CVE" (that normalizes to a longer
+    # string with no set membership, so it still forces). Added after an
+    # adversarial review round found these fell through to forced by
+    # default -- correct in direction but a real per-turn cost multiplier on
+    # a chat product's highest-frequency turn shapes.
+    "yes", "no", "sure", "maybe", "yes please", "no thanks",
+    "ok thanks", "okay thanks", "great thanks", "sounds great",
+    "never mind", "nevermind", "makes sense", "understood", "noted",
+    "will do", "roger that", "one moment", "hold on", "continue",
+    "go on", "please continue", "can you repeat that",
+})
+
+# Strip everything except letters/digits/whitespace (all punctuation,
+# including apostrophes, so "how's it going" and "hows it going" normalize
+# identically), then collapse whitespace to single spaces. A message that
+# normalizes to "" (e.g. a bare emoji reaction, or pure punctuation) is
+# handled by is_off_topic() directly, not by this function. To extend
+# _OFF_TOPIC_PHRASES, add the new phrase already in this normalized form:
+# lowercase, no punctuation, single spaces.
+_NORMALIZE_RE = re.compile(r"[^\w\s]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize(user_message: str) -> str:
+    """Lowercase, strip punctuation, and collapse whitespace -- see the
+    comment above _NORMALIZE_RE for the exact rules and rationale."""
+    stripped = _NORMALIZE_RE.sub("", user_message.strip().lower())
+    return _WHITESPACE_RE.sub(" ", stripped).strip()
+
+
+def is_off_topic(user_message: str) -> bool:
+    """True only for the narrow allowlist where withholding the forced
+    consult_specialist tool_choice is deliberately safe: greetings/small
+    talk, a meta-question about the tool/orchestrator itself, or a short
+    affirmation/filler reply -- and only when the ENTIRE message (after
+    normalization, see _normalize()) is one of the curated phrases, or
+    normalizes to nothing at all (e.g. a bare emoji reaction). Everything
+    else returns False, i.e. forces by default -- see the comment block
+    above _OFF_TOPIC_PHRASES for why exact-match-on-the-whole-message is the
+    safe design here.
+    """
+    if not user_message.strip():
+        return True
+    normalized = _normalize(user_message)
+    if not normalized:
+        return True
+    return normalized in _OFF_TOPIC_PHRASES
 
 
 SPECIALIST_TOOLS: list[dict[str, Any]] = [

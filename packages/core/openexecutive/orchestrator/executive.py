@@ -62,6 +62,7 @@ from openexecutive.orchestrator.research_tools import (
 )
 from openexecutive.orchestrator.router import (
     SPECIALIST_TOOLS,
+    is_off_topic,
     partition_specialist_fanout,
     plausibly_on_topic,
     route_parallel,
@@ -1127,7 +1128,25 @@ class Executive:
         # model has either already consulted a specialist or made its own
         # choice, and forcing further tool calls during synthesis would
         # prevent it from ever finishing with a text answer.
-        force_specialist_consult = bool(user_message) and plausibly_on_topic(user_message)
+        #
+        # Forces by default; is_off_topic() is a narrow allowlist (greetings/
+        # small talk, meta-questions about the tool itself) for the cases
+        # where withholding the force is deliberately safe. This inverts the
+        # prior design, which forced only when plausibly_on_topic() matched a
+        # keyword -- that missed real domain-specific queries whose wording
+        # didn't happen to hit one (an OT/shadow-AI incident query matched
+        # zero keywords across all 13 specialists and silently fell back to
+        # unforced "auto"). This is a security-adjacent advisory tool: the
+        # safe failure direction is over-forcing, not under-forcing.
+        force_specialist_consult = bool(user_message) and not is_off_topic(user_message)
+        if user_message:
+            # plausibly_on_topic() no longer gates the decision above -- kept
+            # here purely as an observability signal so SPECIALIST_KEYWORDS
+            # coverage can still be reviewed/tuned from the logs.
+            logger.info(
+                "topic_gate: force=%s plausibly_on_topic=%s message_len=%d",
+                force_specialist_consult, plausibly_on_topic(user_message), len(user_message),
+            )
 
         for iteration in range(1, max_iterations + 1):
             logger.info(
