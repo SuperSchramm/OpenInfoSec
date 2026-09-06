@@ -59,6 +59,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "memory_snapshot",      # episodic context + company profile at turn entry
     "committee_review",     # committee-reviewed draft + critiques (pre-existing emit, now declared)
     "peer_memory",          # Honcho per-person memory — prefetch + sync_turn outcomes
+    "narration_policy_violation",  # response narrates a consult with no backing dispatch this turn (log-only, never blocks)
 )
 
 

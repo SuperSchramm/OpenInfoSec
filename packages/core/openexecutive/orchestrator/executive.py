@@ -48,6 +48,7 @@ from openexecutive.orchestrator.form_tools import (
     build_form_patch_event,
 )
 from openexecutive.orchestrator.mcp_gateway import MCP_TOOL_NAMES, MCP_TOOLS, MCPGateway
+from openexecutive.orchestrator.narration_integrity import narration_policy_violation
 from openexecutive.orchestrator.onboarding_tools import (
     ONBOARDING_TOOL_HANDLERS,
     ONBOARDING_TOOLS,
@@ -61,6 +62,7 @@ from openexecutive.orchestrator.research_tools import (
     RESEARCH_TOOLS,
 )
 from openexecutive.orchestrator.router import (
+    SPECIALIST_REGISTRY,
     SPECIALIST_TOOLS,
     is_off_topic,
     partition_specialist_fanout,
@@ -311,6 +313,54 @@ def _emit_memory_snapshot(
             "retrieved_context": retrieved_context,
             "system_blocks": _system_block_names(system_blocks),
         },
+    )
+
+
+def _check_narration_integrity(
+    *,
+    session_id: str | None,
+    turn_id: str | None,
+    iteration: int,
+    full_response_text: str,
+    specialists_consulted: list[str],
+    is_committee_draft: bool,
+) -> None:
+    """Log (never block/retry/modify) when the turn's accumulated response
+    text narrates a specialist consult but no specialist was actually
+    dispatched this turn. See narration_integrity.py's module docstring for
+    the detector's known scope limits (turn-level, not per-specialist; a
+    real consult to ANY specialist suppresses detection of a fabricated
+    claim about a DIFFERENT one in the same response).
+
+    ``full_response_text`` is every iteration's streamed text concatenated
+    (all of it was already yielded to the caller live, regardless of which
+    iteration it came from) -- on the max_iterations-exhaustion path this is
+    NOT the same string as the final fallback yield (`last_full_text`, the
+    last iteration only), so a row's `full.response_text` should be read as
+    "everything streamed this turn," not "the exact final fallback text."
+
+    ``is_committee_draft`` records which of the two `_stream_agent_loop`
+    callers this run is: `stream_chat_with_committee` invokes this loop only
+    to produce an internal draft (never shown to the user; the delivered
+    text comes from a separate revision call this check never sees), while
+    every other caller's output IS the delivered text. Recorded as
+    `details["phase"]` ("committee_draft" vs "final") so a row can be told
+    apart from one describing what the user actually received without an
+    indirect join against `committee_review` rows on the same turn_id.
+    """
+    violation = narration_policy_violation(full_response_text, specialists_consulted)
+    if not violation:
+        return
+    phase = "committee_draft" if is_committee_draft else "final"
+    audit_log(
+        "narration_policy_violation",
+        f"Response narrates a consult ({violation!r}) with no backing "
+        f"specialist dispatch this turn (phase={phase})",
+        session_id=session_id,
+        turn_id=turn_id,
+        actor="executive",
+        details={"matched_phrase": violation, "iteration": iteration, "phase": phase},
+        full={"response_text": full_response_text},
     )
 
 
@@ -839,6 +889,7 @@ class Executive:
             specialist_outputs_out=specialist_outputs,
             turn_id=turn_id,
             user_message=user_message,
+            is_committee_draft=True,
         ):
             # Swallow draft text and the THINKING sentinel — the user sees
             # only the revised stream. Pass debug-event dicts through so the
@@ -1113,8 +1164,14 @@ class Executive:
         specialist_outputs_out: dict[str, str] | None = None,
         turn_id: str | None = None,
         user_message: str = "",
+        is_committee_draft: bool = False,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Tool-use loop that yields text deltas as they arrive.
+
+        ``is_committee_draft`` is forwarded verbatim to
+        _check_narration_integrity's ``details["phase"]`` -- see that
+        function's docstring. It has no other effect: this loop's own
+        behavior (streaming, tool dispatch, forcing) is identical either way.
 
         Yields _THINKING before each specialist call round so callers can send
         keepalive/progress events while the blocking specialist calls run.
@@ -1122,7 +1179,12 @@ class Executive:
         """
         current_messages = list(messages)
         last_full_text = ""
+        full_response_text = ""
         specialists_consulted: list[str] = []
+        # Guards the max_iterations-exhaustion fallback below (unreached if
+        # max_iterations <= 0, where the loop body -- and the per-iteration
+        # `session_id = getattr(...)` it would otherwise pick up -- never runs.
+        session_id: str | None = None
         # Computed once per turn — the message doesn't change across
         # iterations. Only applied on iteration 1 (below): after that the
         # model has either already consulted a specialist or made its own
@@ -1242,6 +1304,7 @@ class Executive:
                     response_content.append(block.model_dump(exclude_none=True))
 
             last_full_text = full_text
+            full_response_text += full_text
 
             if web_search_queries:
                 session_id = getattr(current_session.get(), "session_id", None)
@@ -1271,6 +1334,14 @@ class Executive:
                     )
 
             if final_msg.stop_reason != "tool_use":
+                _check_narration_integrity(
+                    session_id=getattr(current_session.get(), "session_id", None),
+                    turn_id=turn_id,
+                    iteration=iteration,
+                    full_response_text=full_response_text,
+                    specialists_consulted=specialists_consulted,
+                    is_committee_draft=is_committee_draft,
+                )
                 return
 
             specialist_tool_uses = [tu for tu in tool_uses if tu["name"] == "consult_specialist"]
@@ -1365,9 +1436,30 @@ class Executive:
                         fanout_cap,
                         len(skipped_results),
                     )
-                specialists_consulted.extend(c["specialist"] for c in run_calls)
+                # Only count calls that named a real registry key. An
+                # unregistered/missing `specialist` (a non-Anthropic model
+                # not honoring the tool schema's enum, or a malformed tool
+                # call) makes route_to_specialist return an "Unknown
+                # specialist: ..." string rather than raising -- without
+                # this filter that still counts as "consulted," which would
+                # permanently and silently disable narration_policy_violation
+                # for the rest of the turn despite zero real dispatch having
+                # occurred.
+                # Only count calls that named a real registry key. An
+                # unregistered/missing `specialist` (a non-Anthropic model
+                # not honoring the tool schema's enum, or a malformed tool
+                # call) makes route_to_specialist return an "Unknown
+                # specialist: ..." string rather than raising -- without
+                # this filter that still counts as "consulted," which would
+                # permanently and silently disable narration_policy_violation
+                # for the rest of the turn despite zero real dispatch having
+                # occurred.
+                really_consulted = [
+                    c["specialist"] for c in run_calls if c["specialist"] in SPECIALIST_REGISTRY
+                ]
+                specialists_consulted.extend(really_consulted)
                 if consulted_out is not None:
-                    consulted_out.extend(c["specialist"] for c in run_calls)
+                    consulted_out.extend(really_consulted)
                 if specialist_outputs_out is not None:
                     for call, result in zip(
                         run_calls, specialist_results, strict=True
@@ -1526,6 +1618,14 @@ class Executive:
             current_messages.append({"role": "user", "content": tool_results})
 
         logger.warning("max_iterations=%d reached — returning partial result", max_iterations)
+        _check_narration_integrity(
+            session_id=session_id,
+            turn_id=turn_id,
+            iteration=max_iterations,
+            full_response_text=full_response_text,
+            specialists_consulted=specialists_consulted,
+            is_committee_draft=is_committee_draft,
+        )
         yield last_full_text or "I was unable to complete the analysis. Please try again."
 
     async def chat(

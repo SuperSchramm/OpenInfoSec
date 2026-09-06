@@ -37,8 +37,14 @@ from contextlib import ExitStack
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from openexecutive.orchestrator.executive import Executive
-from openexecutive.orchestrator.router import SPECIALIST_KEYWORDS, plausibly_on_topic
+from openexecutive.orchestrator.router import (
+    SPECIALIST_KEYWORDS,
+    SPECIALIST_REGISTRY,
+    plausibly_on_topic,
+)
 
 
 class _TextBlock:
@@ -299,3 +305,99 @@ def test_plausibly_on_topic_matches_each_specialist_domain() -> None:
 def test_plausibly_on_topic_false_for_small_talk() -> None:
     for message in ["hi", "thanks, that helps", "good morning", "sounds good"]:
         assert not plausibly_on_topic(message)
+
+
+@pytest.mark.parametrize("specialist_key", sorted(SPECIALIST_REGISTRY.keys()))
+def test_forced_consult_reaches_route_to_specialist_for_every_registry_key(
+    specialist_key: str,
+) -> None:
+    """A consult_specialist tool_use call naming each SPECIALIST_REGISTRY key
+    must actually reach router.route_to_specialist with that key -- not just
+    satisfy the tool_choice/keyword-classification checks above (none of
+    which patch route_to_specialist or inspect what it was called with).
+
+    Patches route_to_specialist itself (the dispatch boundary router.py
+    calls into per specialist) rather than route_parallel wholesale -- the
+    same real_dispatch pattern proven in
+    test_narration_consultation_integrity.py's `_run_loop_with_collector`.
+    Mocking route_parallel (as `mock_route_parallel=True` above does for the
+    unrelated tool_choice-repeat assertion) would hide a specialist_name
+    typo or registry-key mismatch entirely; this proves route_parallel's own
+    dispatch loop reaches the right key for all 13 registry entries.
+
+    Includes `triage`: nothing in _stream_agent_loop, route_to_specialist,
+    or the consult_specialist tool schema special-cases it (the enum is
+    `sorted(SPECIALIST_REGISTRY.keys())`, unfiltered) -- SPECIALIST_KEYWORDS
+    omitting triage is an unrelated, separate exclusion (see router.py's
+    comment above SPECIALIST_KEYWORDS). So triage gets the same dispatch-
+    parity assertion as every other key, not a special "never dispatched"
+    claim that the code doesn't actually back.
+    """
+    provider = _ScriptedProvider(
+        [
+            _FinalMsg(
+                [
+                    _ToolUseBlock(
+                        "tu-1",
+                        "consult_specialist",
+                        {"specialist": specialist_key, "query": "test query"},
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+            _FinalMsg([_TextBlock("final answer")], stop_reason="end_turn"),
+        ]
+    )
+    recorded_calls: list[dict[str, Any]] = []
+
+    async def _fake_route_to_specialist(**kwargs: Any) -> str:
+        recorded_calls.append(kwargs)
+        return "specialist output"
+
+    async def _go() -> None:
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "openexecutive.orchestrator.executive.get_provider",
+                    return_value=provider,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openexecutive.orchestrator.router.route_to_specialist",
+                    new=_fake_route_to_specialist,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openexecutive.orchestrator.router._retrieve_for_call",
+                    return_value="",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openexecutive.orchestrator.router._retrieve_failures_for_call",
+                    return_value="",
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "openexecutive.orchestrator.router._prefetch_department_for_call",
+                    return_value="",
+                )
+            )
+            async for _ in Executive()._stream_agent_loop(
+                system_blocks=[],
+                messages=[{"role": "user", "content": "test message"}],
+                model="claude-test",
+                user_message="test message",
+            ):
+                pass
+
+    asyncio.run(_go())
+
+    assert len(recorded_calls) == 1, (
+        f"expected exactly one route_to_specialist call for {specialist_key!r}, "
+        f"got {len(recorded_calls)}"
+    )
+    assert recorded_calls[0]["specialist_name"] == specialist_key
