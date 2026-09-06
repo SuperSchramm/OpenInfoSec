@@ -15,7 +15,7 @@ A walkthrough of Open Executive in action — [watch on YouTube](https://youtu.b
 
 ## What It Does
 
-Developed by [sentelabs.ai](https://sentelabs.ai) Open Executive provides a single coherent executive voice backed by eight specialist AI agents:
+Developed by [sentelabs.ai](https://sentelabs.ai) Open Executive provides a single coherent executive voice backed by twelve specialist AI agents:
 
 - **Chief Strategy Officer** — competitive analysis, M&A, market positioning, OKRs
 - **Chief Financial Officer** — financial modeling, fundraising, unit economics, cash flow
@@ -25,8 +25,12 @@ Developed by [sentelabs.ai](https://sentelabs.ai) Open Executive provides a sing
 - **Chief Marketing Officer** — GTM strategy, brand, communications, PR
 - **Chief Product Officer** — roadmap, prioritization, product strategy
 - **Board Communications Director** — board decks, investor relations, governance
+- **Chief Information Security Officer** — security strategy, risk posture, board reporting, cross-domain security governance
+- **Director of Cyber Operations** — SOC/IR, threat detection, OT/ICS security, vulnerability management, incident response
+- **Director of Governance, Risk & Compliance** — framework mapping, audit prep, policy, regulatory compliance
+- **Head of Talent & Executive Search** — candidate screening & fit scoring, executive sourcing
 
-All responses come from one consistent executive voice. The internal agent architecture is never exposed to the user. Beyond Q&A, the system maintains episodic memory of past decisions and initiatives across sessions, and a built-in scheduler can proactively surface follow-ups and time-sensitive actions.
+All twelve specialists — and the Executive orchestrator itself — run on Anthropic Claude models by default; see [Tech Stack](#tech-stack) below. All responses come from one consistent executive voice. The internal agent architecture is never exposed to the user. Beyond Q&A, the system maintains episodic memory of past decisions and initiatives across sessions, and a built-in scheduler can proactively surface follow-ups and time-sensitive actions.
 
 ## Architecture
 
@@ -35,7 +39,7 @@ User message
     ↓
 Executive Orchestrator (claude-sonnet-4-6)
     ↓ tool use → parallel specialist calls
-CSO / CFO / CHRO / GC / COO / CMO / CPO / Board
+CSO / CFO / CHRO / GC / COO / CMO / CPO / Board / CISO / CyberOps / GRC / Talent
     ↓ each specialist retrieves relevant context from ChromaDB
 Built-in MBA knowledge + Your company documents
     ↓
@@ -57,8 +61,8 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 | Layer | Choice |
 |---|---|
 | LLM backbone | Anthropic Claude API |
-| Default model | `claude-sonnet-4-6` (Executive + most specialists) |
-| Deep reasoning | `claude-opus-4-7` (CSO, CFO, GC, Board — with extended thinking) |
+| Default model | `claude-sonnet-4-6` — Executive + all 12 specialists by default. Local/self-hosted models (Ollama, LM Studio, vLLM) are supported for dev cost reduction but are opt-in, not the default (see [Running on Local Models](#running-on-local-models)) |
+| Deep reasoning | `claude-opus-4-7` for specialists needing extended thinking (CSO, CFO, GC, Board, Talent, CISO, GRC) — configurable via `DEEP_REASONING_MODEL` |
 | Backend | Python 3.11 + FastAPI |
 | Package manager | `uv` |
 | Vector store | ChromaDB (local, embedded) |
@@ -232,6 +236,8 @@ Both workflows use `dorny/paths-filter` to deploy only the changed app (API, UI,
 
 > **⚠️ Single-instance only**: The scheduler claims rows via `UPDATE … RETURNING`. Running two API machines would double-fire scheduled actions. `max_machines_running = 1` is set in `fly.api.toml` / `fly.api.qa.toml` — do not override it.
 
+> **Background jobs are explicitly enabled in deployed environments.** `fly.api.toml` / `fly.api.qa.toml` set `BACKGROUND_JOBS_ENABLED=true` — these are attended, monitored deployments, not the unattended-local-session risk the flag's default-off exists to guard against. Local dev (`.env`) leaves it unset/`false` so a `make dev` left running overnight can't rack up billed API calls with nobody watching.
+
 ### Required GitHub Actions secrets
 
 Deploys authenticate with per-app Fly deploy tokens stored as repo (or org) Actions secrets. Generate each with `flyctl tokens create deploy -a <app> -x 999999h`:
@@ -282,12 +288,13 @@ the app refuses to start.
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | Yes¹ | — | Anthropic API key |
 | `DEFAULT_MODEL` | No | `claude-sonnet-4-6` | Executive + most specialists |
-| `DEEP_REASONING_MODEL` | No | `claude-opus-4-7` | CSO, CFO, GC, Board |
+| `DEEP_REASONING_MODEL` | No | `claude-opus-4-7` | CSO, CFO, GC, Board, Talent, CISO, GRC |
 | `VECTOR_STORE_PATH` | No | `./chroma_db` | ChromaDB directory |
 | `EPISODIC_DB_PATH` | No | `./episodic_memory.db` | SQLite for episodic memory |
 | `COMPANY_PROFILE_PATH` | No | `./company/profile.yaml` | Company profile |
 | `ENABLE_CACHING` | No | `true` | Anthropic prompt caching |
 | `ROUTING_MODEL` | No | `claude-haiku-4-5-20251001` | Model for intent routing |
+| `BACKGROUND_JOBS_ENABLED` | No | `false` | Master kill switch for the scheduler + email poller. Off by default so an unattended local `make dev` can't rack up billed API calls; deployed environments (`fly.api.toml` / `fly.api.qa.toml`) explicitly set this `true` since those are attended/monitored, not unattended-drain risks. Does not affect the WaitForHuman resumer (always runs) or reactive chat/integration paths |
 | `SLACK_BOT_TOKEN` | No | — | Slack bot OAuth token |
 | `SLACK_APP_TOKEN` | No | — | Slack socket mode token |
 | `EXEC_EMAIL_ADDRESS` | No | — | Executive Gmail address (Gmail MCP OAuth) |
@@ -320,6 +327,12 @@ See [.env.example](.env.example) for the full list.
 > or route through OpenRouter (`OPENROUTER_ENABLED`).
 
 ## Running on Local Models
+
+A fresh clone runs the Executive and all 12 specialists on Claude out of the
+box — local models are **not** the default path. This section is for anyone
+who wants to swap some or all agents onto a local/self-hosted model, most
+commonly to cut cost during heavy local development (department-agent traffic
+can be meaningfully higher-volume than the Executive's own calls).
 
 Open Executive can run against any **OpenAI-compatible** local server — Ollama,
 LM Studio, vLLM, or llama.cpp — instead of (or alongside) the Anthropic API.
