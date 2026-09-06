@@ -526,6 +526,57 @@ class Settings(BaseSettings):
             raise ValueError("UI_BASE_URL must include a host")
         return v
 
+    # Global kill switch for the two independent-timer-driven mechanisms that
+    # make real, billed API calls unattended: the scheduler dispatcher
+    # (which fans out to dept_cadence, nudge_scan, external_monitor_scan,
+    # watchlist_research_scan, notion_sync_scan, client_rotation, principal
+    # briefs, executive_reflection, onboarding drip, and ad-hoc scheduled
+    # follow-ups) and the email poller. A superset AND-condition layered on
+    # top of each mechanism's own existing flag (SCHEDULER_ENABLED,
+    # MCP_ENABLED) at their task-creation call sites in api/main.py's
+    # lifespan() -- not a replacement for them.
+    #
+    # Deliberately does NOT gate the WaitForHuman resumer (also started in
+    # the same lifespan) -- it makes zero LLM/API calls of its own, so it
+    # doesn't fit this flag's cost-drain rationale, and gating it would
+    # silently defer approval-timeout handling by default. It always runs,
+    # continuously applying each run's on_timeout policy (escalate /
+    # auto_proceed / fail) as its deadline passes -- NOT just in a batch on
+    # re-enable (see below). Known asymmetry: nudge_scan (the scheduler
+    # heartbeat that reminds a human about a stalled approval before its
+    # deadline) IS part of what this flag gates, while the resumer's own
+    # timeout enforcement is not -- so with this flag off, an on_timeout=
+    # auto_proceed gate can silently auto-approve with no reminder ever
+    # having been sent. Prefer on_timeout=escalate (the default) where that
+    # matters; this flag does not change which policy a workflow chose.
+    #
+    # Default OFF: unlike most flags below (which default on because
+    # they're already-shipped, low-risk product behavior), this one exists
+    # specifically so a `make dev` left running unattended cannot silently
+    # burn billed API credit with nobody watching. On a deployed/attended
+    # Fly instance (fly.api.toml / fly.api.qa.toml) it is explicitly set
+    # true -- the drain risk this guards against is an unattended local
+    # session, not a monitored deployment. Does NOT gate reactive/on-demand
+    # paths -- an explicit user chat request, an inbound Discord/Slack/
+    # Telegram/Google Chat message, or an on-demand MCP tool call inside a
+    # chat turn all still work with this flag off; only independent timer
+    # firing is affected.
+    #
+    # Turning this off does NOT stop scheduled_actions rows from being
+    # enqueued (bootstrap_* seeding, ad-hoc chat follow-ups, and onboarding
+    # drip scheduling are unaffected) -- only their consumption (by the
+    # scheduler) is paused. Re-enabling after an extended off period drains
+    # and dispatches whatever backlog accumulated in one burst -- real
+    # outbound messages, billed turns, all at once. This is a deliberately
+    # simple binary gate, not a smart re-enable policy; if backlog replay
+    # becomes a real problem, that's a separate improvement.
+    #
+    # This is unrelated to the resumer's own sweep_stale_awaiting(), which
+    # is NOT batched by this flag going off/on -- it runs every time the
+    # process boots (flag or no flag) and simply catches up on whatever
+    # went stale while the process itself was down.
+    background_jobs_enabled: bool = Field(False, alias="BACKGROUND_JOBS_ENABLED")
+
     # Proactive nudges / scheduler
     user_timezone: str = Field("UTC", alias="USER_TIMEZONE")
     max_scheduled_horizon_days: int = Field(30, alias="MAX_SCHEDULED_HORIZON_DAYS")

@@ -515,6 +515,7 @@ All settings via environment variables (`.env` file in `packages/core/`).
 | `EPISODIC_DB_PATH` | No | `./episodic_memory.db` | SQLite for episodic memory, alerts, audit, scheduler |
 | `ENABLE_CACHING` | No | `true` | Anthropic prompt caching |
 | `SCHEDULER_ENABLED` | No | `true` | Enable background scheduler |
+| `BACKGROUND_JOBS_ENABLED` | No | `false` | Master kill switch for the scheduler + email poller (superset AND-condition over `SCHEDULER_ENABLED`/`MCP_ENABLED`); off by default so an unattended local session can't silently drain billed API credit. Set `true` for any attended/deployed instance. Does not affect the WaitForHuman resumer (always runs) or reactive paths (chat, Discord/Slack/Telegram/Google Chat). |
 | `SCHEDULER_POLL_INTERVAL_SECONDS` | No | `30` | Scheduler poll frequency |
 | `SLACK_BOT_TOKEN` | No | — | Slack bot OAuth token |
 | `SLACK_APP_TOKEN` | No | — | Slack socket mode token |

@@ -164,6 +164,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     settings = get_settings()
 
+    if not settings.background_jobs_enabled:
+        # Loud and early -- the alternative is an on-call engineer staring at
+        # an empty log where "scheduler started" / an email-poller banner
+        # used to be, with no way to tell "intentionally gated" from "the
+        # task crashed at import" without reading source.
+        logging.getLogger("openexecutive").warning(
+            "BACKGROUND_JOBS_ENABLED is off (default) -- the scheduler "
+            "dispatcher and email poller will NOT start this process, so "
+            "department cadences, principal briefs, proactive nudges, "
+            "external monitoring, watchlist research, and inbound email "
+            "are all paused. Setting BACKGROUND_JOBS_ENABLED=true also "
+            "requires SCHEDULER_ENABLED=true (scheduler) and MCP_ENABLED="
+            "true (email) to actually take effect. (The WaitForHuman "
+            "resumer is unaffected -- it always runs, including its own "
+            "on_timeout enforcement on approval gates.)"
+        )
+
     store = ChromaDBStore(persist_directory=settings.vector_store_path)
     app.state.store = store
     # Hand the warm store to the MCP server's resource/tool handlers, which
@@ -312,12 +329,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.mcp_gateway = gateway
         set_active_gateway(gateway)
 
-        from openexecutive.integrations.email_poller import run_email_poller
-        email_poller_task = asyncio.create_task(run_email_poller(gateway))
+        # The gateway itself (above) stays unconditional on mcp_enabled --
+        # it also serves on-demand MCP tool calls from a live chat turn.
+        # The email poller is the one independent-timer piece riding on
+        # this flag: it polls unattended on a fixed interval and each new
+        # message triggers a real (committee-review, multi-call) LLM turn,
+        # so it additionally requires background_jobs_enabled.
+        if settings.background_jobs_enabled:
+            from openexecutive.integrations.email_poller import run_email_poller
+            email_poller_task = asyncio.create_task(run_email_poller(gateway))
     else:
         app.state.mcp_gateway = None
 
-    if settings.scheduler_enabled:
+    # BACKGROUND_JOBS_ENABLED gates this task (in addition to its own
+    # SCHEDULER_ENABLED) because the scheduler is the dispatcher for every
+    # timer-driven "kind" that costs real API tokens unattended -- dept
+    # cadences, the nudge/external-monitor/watchlist-research heartbeats,
+    # principal briefs, executive reflection, client rotation. See
+    # config.py's comment on background_jobs_enabled for the full rationale.
+    if settings.background_jobs_enabled and settings.scheduler_enabled:
         from openexecutive.scheduler import run_scheduler
 
         scheduler_task = asyncio.create_task(
@@ -329,6 +359,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Start the WaitForHuman resumer alongside the scheduler (same single-worker
     # constraint — do not run in more than one process against the same DB).
+    # Deliberately NOT gated by background_jobs_enabled: unlike the scheduler
+    # and email poller, this loop makes zero LLM/API calls of its own (it
+    # only applies the escalate/auto_proceed/fail on_timeout policy to
+    # stale awaiting_human runs), so it doesn't fit the cost-drain rationale
+    # that flag exists for -- and gating it would silently defer approval
+    # timeouts by default on any fresh install.
+    # Intentionally NOT gated by BACKGROUND_JOBS_ENABLED: zero LLM cost,
+    # pure DB bookkeeping; see architecture-facts.yaml for the nudge/
+    # auto_proceed asymmetry this creates.
     from openexecutive.workflows.resumer import run_resumer
     resumer_task = asyncio.create_task(run_resumer())
 
