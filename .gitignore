@@ -74,6 +74,10 @@ Thumbs.db
 # Obsidian vault config (personal notes workspace — not part of the project)
 .obsidian/
 
+# Local MCP server config — machine-specific paths (e.g. ciso-assistant's
+# checkout location), not shared project config
+.mcp.json
+
 # Eval results (generated, not committed)
 evals/results/
 
