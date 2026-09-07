@@ -62,7 +62,7 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 |---|---|
 | LLM backbone | Anthropic Claude API |
 | Default model | `claude-sonnet-4-6` — Executive + all 12 specialists by default. Local/self-hosted models (Ollama, LM Studio, vLLM) are supported for dev cost reduction but are opt-in, not the default (see [Running on Local Models](#running-on-local-models)) |
-| Deep reasoning | `claude-opus-4-7` for specialists needing extended thinking (CSO, CFO, GC, Board, Talent, CISO, GRC) — configurable via `DEEP_REASONING_MODEL` |
+| Deep reasoning | `claude-opus-4-7` for specialists needing extended thinking (CSO, CFO, GC, Board, Talent) — configurable via `DEEP_REASONING_MODEL` |
 | Backend | Python 3.11 + FastAPI |
 | Package manager | `uv` |
 | Vector store | ChromaDB (local, embedded) |
@@ -288,12 +288,13 @@ the app refuses to start.
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | Yes¹ | — | Anthropic API key |
 | `DEFAULT_MODEL` | No | `claude-sonnet-4-6` | Executive + most specialists |
-| `DEEP_REASONING_MODEL` | No | `claude-opus-4-7` | CSO, CFO, GC, Board, Talent, CISO, GRC |
+| `DEEP_REASONING_MODEL` | No | `claude-opus-4-7` | CSO, CFO, GC, Board, Talent |
+| `EXECUTIVE_MODEL` | No | — (falls back to `DEFAULT_MODEL`) | The Executive orchestrator's own reasoning — routing/dispatch judgment, Committee review, final synthesis. Separate from `DEFAULT_MODEL`, which governs the non-security department agents. Set explicitly to pin the orchestrator to Claude even when `DEFAULT_MODEL` points at a local/non-Claude model |
 | `VECTOR_STORE_PATH` | No | `./chroma_db` | ChromaDB directory |
 | `EPISODIC_DB_PATH` | No | `./episodic_memory.db` | SQLite for episodic memory |
 | `COMPANY_PROFILE_PATH` | No | `./company/profile.yaml` | Company profile |
 | `ENABLE_CACHING` | No | `true` | Anthropic prompt caching |
-| `ROUTING_MODEL` | No | `claude-haiku-4-5-20251001` | Model for intent routing |
+| `ROUTING_MODEL` | No | `claude-haiku-4-5-20251001` | Triage/dispatch routing, plus lightweight utility tasks (approval-reply parsing, awaiting-human disambiguation, Discord response-gate/title generation) and memory/workflow summarization (initiatives consolidation, episodic memory, executive reflection/research) |
 | `BACKGROUND_JOBS_ENABLED` | No | `false` | Master kill switch for the scheduler + email poller. Off by default so an unattended local `make dev` can't rack up billed API calls; deployed environments (`fly.api.toml` / `fly.api.qa.toml`) explicitly set this `true` since those are attended/monitored, not unattended-drain risks. Does not affect the WaitForHuman resumer (always runs) or reactive chat/integration paths |
 | `SLACK_BOT_TOKEN` | No | — | Slack bot OAuth token |
 | `SLACK_APP_TOKEN` | No | — | Slack socket mode token |
