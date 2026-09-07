@@ -167,13 +167,24 @@ def _placeholders(text: str) -> list[str]:
 
 
 def _valid_specialists() -> frozenset[str]:
-    """Live specialist keys, falling back to the known set on import trouble."""
-    try:
-        from openexecutive.orchestrator.router import SPECIALIST_REGISTRY
+    """Live chat-consultable specialist keys, falling back to the known set
+    on import trouble.
 
-        return frozenset(SPECIALIST_REGISTRY.keys())
+    Uses ``CHAT_CONSULTABLE_SPECIALISTS`` (SPECIALIST_REGISTRY minus
+    "triage"), not raw registry membership: a saved step naming "triage"
+    would pass raw-membership validation but then hit route_to_specialist's
+    rejection at run time, folding a "not available via consult_specialist"
+    string into the workflow's output artifact instead of real analysis --
+    silently, since dynamic workflows can run unattended on a cadence. See
+    router.CHAT_CONSULTABLE_SPECIALISTS's docstring for why "triage" is
+    excluded.
+    """
+    try:
+        from openexecutive.orchestrator.router import CHAT_CONSULTABLE_SPECIALISTS
+
+        return CHAT_CONSULTABLE_SPECIALISTS
     except Exception:  # pragma: no cover - defensive; registry import is stable
-        return _FALLBACK_SPECIALISTS
+        return _FALLBACK_SPECIALISTS - {"triage"}
 
 
 def _person_exists(person_id: int) -> bool:

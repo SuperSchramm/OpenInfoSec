@@ -402,6 +402,79 @@ def test_bogus_specialist_name_does_not_suppress_detection(audit: AuditLogger) -
     )
 
 
+def test_triage_chat_consult_does_not_suppress_detection(audit: AuditLogger) -> None:
+    """Issue #1's second symptom, distinct from the bogus-name case above:
+    "triage" IS a real `SPECIALIST_REGISTRY` member (unlike
+    "not_a_real_specialist"), so the OLD raw-registry-membership filter in
+    executive.py's `really_consulted` -- the exact fix that closed the
+    bogus-name gap -- did NOT catch it. Nothing stopped a forced chat consult
+    from naming `specialist="triage"`, despite triage being meta-routing for
+    the alert pipeline (agents/triage.py + alerts/pipeline.py), not a domain
+    specialist. Before this test's fix, `really_consulted` used
+    `SPECIALIST_REGISTRY` membership, so this call alone made
+    `specialists_consulted` truthy and permanently suppressed
+    narration_policy_violation for the rest of the turn -- despite
+    route_to_specialist having rejected the call and run zero real analysis.
+    The fix tightens `really_consulted` to `CHAT_CONSULTABLE_SPECIALISTS`
+    (SPECIALIST_REGISTRY minus "triage"), the same allowed set
+    route_to_specialist itself now validates against.
+
+    Uses patch_retrieval_only (route_to_specialist runs for real -- its
+    triage-rejection fallback is pure Python, no network call) so this
+    exercises the actual code path the gap was in, not a mock standing in
+    for it.
+    """
+    provider = _ScriptedProvider(
+        [
+            _FinalMsg(
+                [
+                    _ToolUseBlock(
+                        "tu-1",
+                        "consult_specialist",
+                        {"specialist": "triage", "query": "runway"},
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+            _FinalMsg(
+                [_TextBlock("After checking with our CFO, hold off on the raise.")],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    collector = DebugCollector(turn_id="audit-triage-specialist")
+
+    response_text = _run_loop_with_collector(
+        provider,
+        "What should our runway look like before the next fundraising round?",
+        collector,
+        patch_retrieval_only=True,
+    )
+
+    # route_parallel's specialist_start/specialist_done emits aren't gated on
+    # validity, so they still fire -- same as the bogus-name case.
+    logged_specialist_events = [
+        e for e in collector._events if e.kind in ("specialist_start", "specialist_done")
+    ]
+    assert logged_specialist_events, (
+        "specialist_start/specialist_done still fire even for a rejected "
+        "'triage' consult -- route_parallel's own emits aren't gated on "
+        "chat-consultability, only specialists_consulted is"
+    )
+    violations = [
+        e
+        for e in audit.query(event_type="narration_policy_violation")
+        if e.turn_id == "audit-triage-specialist"
+    ]
+    assert violations, (
+        f"Response claims a specialist was consulted ({response_text!r}) and "
+        "the only dispatched call named 'triage' -- a real SPECIALIST_REGISTRY "
+        "member but not chat-consultable -- narration_policy_violation must "
+        "still fire, not be silently suppressed by the rejected call still "
+        "counting as 'consulted'"
+    )
+
+
 def test_committee_draft_fabrication_is_tagged_phase_committee_draft(
     audit: AuditLogger,
 ) -> None:

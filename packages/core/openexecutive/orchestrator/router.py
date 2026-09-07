@@ -55,6 +55,18 @@ SPECIALIST_DESCRIPTIONS = {
     "triage": "Chief of Staff — evaluates inbound events (email/Slack/docs) for significance and decides alerting",
 }
 
+# Specialists a chat consult (the `consult_specialist` tool, in whichever
+# surface calls route_to_specialist) may address. Excludes "triage" -- it is
+# meta-routing (inbound-event significance triage for the alert pipeline),
+# not a domain specialist, and its real call path never goes through
+# route_to_specialist: alerts/pipeline.py instantiates TriageAgent() directly
+# and calls its own .triage() method. Mirrors the same exclusion
+# orchestrator/committee.py already applies when picking domain reviewers
+# ("triage" is meta-routing, not a domain). Single source of truth so the
+# tool schema's enum and route_to_specialist's dispatch check can't drift
+# from each other the way SPECIALIST_REGISTRY-membership checks did.
+CHAT_CONSULTABLE_SPECIALISTS = frozenset(SPECIALIST_REGISTRY) - {"triage"}
+
 
 # Cheap keyword heuristic — does a user message plausibly touch a specialist
 # domain? NO LONGER gates the forced tool_choice in executive._stream_agent_loop
@@ -242,8 +254,15 @@ SPECIALIST_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "specialist": {
                     "type": "string",
-                    "enum": sorted(SPECIALIST_REGISTRY.keys()),
-                    "description": f"Which specialist to consult. Options: {', '.join(f'{k} ({v})' for k, v in SPECIALIST_DESCRIPTIONS.items())}",
+                    "enum": sorted(CHAT_CONSULTABLE_SPECIALISTS),
+                    "description": (
+                        "Which specialist to consult. Options: "
+                        + ", ".join(
+                            f"{k} ({v})"
+                            for k, v in SPECIALIST_DESCRIPTIONS.items()
+                            if k in CHAT_CONSULTABLE_SPECIALISTS
+                        )
+                    ),
                 },
                 "query": {
                     "type": "string",
@@ -269,8 +288,30 @@ async def route_to_specialist(
     failure_cases: str = "",
     department_memory: str = "",
 ) -> str:
+    if specialist_name not in CHAT_CONSULTABLE_SPECIALISTS:
+        if specialist_name in SPECIALIST_REGISTRY:
+            # A real registry member (e.g. "triage") that isn't a domain
+            # specialist -- reject with a specific, actionable message
+            # rather than the generic "Unknown specialist" used below, and
+            # fail closed by returning a string (not raising): this runs
+            # inside route_parallel's asyncio.gather(), so raising here
+            # would cancel every sibling specialist call dispatched in the
+            # same turn instead of just failing this one tool_use.
+            return (
+                f"{specialist_name!r} is not available via consult_specialist "
+                "(internal/meta-routing agent, not a domain specialist). "
+                f"Choose one of: {', '.join(sorted(CHAT_CONSULTABLE_SPECIALISTS))}."
+            )
+        return f"Unknown specialist: {specialist_name}"
     agent = SPECIALIST_REGISTRY.get(specialist_name)
     if agent is None:
+        # Defensive only -- CHAT_CONSULTABLE_SPECIALISTS is a subset of
+        # SPECIALIST_REGISTRY by construction, so this shouldn't be
+        # reachable today. Kept as a graceful fallback (not a bare index)
+        # so a future divergence between the two degrades to the same
+        # fail-closed string response instead of a KeyError propagating out
+        # of route_parallel's asyncio.gather() and cancelling every sibling
+        # specialist call dispatched in the same turn.
         return f"Unknown specialist: {specialist_name}"
     return await agent.analyze(
         query=query,

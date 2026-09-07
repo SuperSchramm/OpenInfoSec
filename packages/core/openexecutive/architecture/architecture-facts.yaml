@@ -207,6 +207,28 @@ providers:
 routing:
   pattern: Anthropic tool use with a single `consult_specialist` tool. Multiple parallel tool_use blocks per assistant turn fan out to specialists concurrently.
   parallel_function: openexecutive.orchestrator.router.route_parallel
+  consultable_specialists: |
+    The `consult_specialist` tool's enum (and route_to_specialist's dispatch
+    validation) is `router.CHAT_CONSULTABLE_SPECIALISTS`, not raw
+    `SPECIALIST_REGISTRY` keys. This is `SPECIALIST_REGISTRY` minus `triage`
+    — `triage` is a real registry member (used by the Council UI, the
+    architecture facts generator, executive_research's specialist fan-out
+    scaffolding, etc.) but is meta-routing (inbound-event significance
+    triage for the alert pipeline), not a domain specialist an operator
+    would consult. Its real invocation path never goes through
+    route_to_specialist at all — `alerts/pipeline.py` instantiates
+    `TriageAgent()` directly and calls its own `.triage()` method. A
+    `specialist="triage"` (or any other non-consultable-but-registered name)
+    tool call is rejected by `route_to_specialist` with an explicit string
+    result (fail-closed, not raised — it runs inside `route_parallel`'s
+    `asyncio.gather()`, so raising would cancel every sibling specialist
+    call dispatched in the same turn) and is excluded from
+    `specialists_consulted` by the `really_consulted` filter in
+    `executive.py` (see the `audit` section's `narration_policy_violation`
+    note, gap (3), for why that filter exists).
+    `orchestrator/committee.py`'s reviewer selection independently excludes
+    `triage` too (predates this fix; kept as-is, not refactored onto the new
+    constant, to keep this change's blast radius to the dispatch boundary).
   tool_choice: |
     `_stream_agent_loop` (executive.py) does not run with `tool_choice="auto"`
     unconditionally. On iteration 1 of a fresh turn only, the call is sent
@@ -1199,7 +1221,7 @@ audit:
     - The module-level `_default_logger` is set during FastAPI lifespan via `set_audit_logger()` so non-FastAPI call sites (Executive, integration handlers, scheduler) can log without threading an instance around.
     - Instrumentation observes only — cache_event reads from `final_msg.usage` AFTER each response. The one request-side touch is a top-level usage-accounting flag (OpenRouter's `usage.include`) added by the translator (`to_openai_request`) so the provider reports `usage.cost`; it leaves the messages and the cache_control system blocks byte-identical, so prompt caching is unaffected. Adding new event types must not modify the system-prompt blocks or message construction, or prompt caching will regress.
     - narration_policy_violation is detection-only by design: it runs after the response text is already finalized and the turn is ending, so there is no code path by which it can alter, retry, or withhold what the user receives. Any future change toward blocking/retrying on this signal is a deliberate policy decision, not a natural extension of this check.
-    - narration_policy_violation has known coverage gaps, accepted (not fixed) when the check shipped, per two rounds of adversarial security review: (1) it is turn-level, not per-specialist — a real consult to ANY specialist this turn suppresses detection of a fabricated claim naming a DIFFERENT specialist in the same response, and because `force_specialist_consult` makes a real dispatch the default outcome on-topic, the check's live trigger surface is narrower than its name suggests (mainly off-topic-classified turns, non-forced later iterations, and forced-but-somehow-undispatched turns); (2) on committee turns (`stream_chat_with_committee`) this check runs against the internal draft `_stream_agent_loop` produces, not the revision actually delivered to the user, so a committee-turn violation row can be a false positive (draft narration the revision removed) or a false negative (narration the revision introduced) — `details["phase"]` is `"committee_draft"` vs `"final"` (threaded via `is_committee_draft` on `_stream_agent_loop`/`_check_narration_integrity`) specifically so these rows are distinguishable without an indirect join against `committee_review` rows on the same `turn_id`; (3) a `consult_specialist` call naming a specialist not in `SPECIALIST_REGISTRY` (a non-Anthropic model not honoring the tool schema's enum, or a malformed call) is filtered out of `specialists_consulted` specifically so it can't masquerade as a real consult and suppress detection — see the `really_consulted` filter in `executive.py`; (4) cross-iteration text accumulation (needed to catch a fabricated claim uttered as preamble before a forced specialist call) also catches preamble before a genuine skill/MCP tool call, so a turn with zero specialist calls can still trip a violation row. See `orchestrator/narration_integrity.py`'s module docstring for detail.
+    - narration_policy_violation has known coverage gaps, accepted (not fixed) when the check shipped, per two rounds of adversarial security review: (1) it is turn-level, not per-specialist — a real consult to ANY specialist this turn suppresses detection of a fabricated claim naming a DIFFERENT specialist in the same response, and because `force_specialist_consult` makes a real dispatch the default outcome on-topic, the check's live trigger surface is narrower than its name suggests (mainly off-topic-classified turns, non-forced later iterations, and forced-but-somehow-undispatched turns); (2) on committee turns (`stream_chat_with_committee`) this check runs against the internal draft `_stream_agent_loop` produces, not the revision actually delivered to the user, so a committee-turn violation row can be a false positive (draft narration the revision removed) or a false negative (narration the revision introduced) — `details["phase"]` is `"committee_draft"` vs `"final"` (threaded via `is_committee_draft` on `_stream_agent_loop`/`_check_narration_integrity`) specifically so these rows are distinguishable without an indirect join against `committee_review` rows on the same `turn_id`; (3) a `consult_specialist` call naming a specialist not in `router.CHAT_CONSULTABLE_SPECIALISTS` (`SPECIALIST_REGISTRY` minus `triage` — either a bogus name from a non-Anthropic model not honoring the tool schema's enum, a malformed call, or `specialist="triage"` itself, which IS a real `SPECIALIST_REGISTRY` member but meta-routing rather than a domain specialist and is rejected by `route_to_specialist` with an explicit message) is filtered out of `specialists_consulted` specifically so it can't masquerade as a real consult and suppress detection — see the `really_consulted` filter in `executive.py` (originally a raw `SPECIALIST_REGISTRY`-membership check; tightened to `CHAT_CONSULTABLE_SPECIALISTS` after that raw check proved insufficient for the `triage` case, which is a registry member); (4) cross-iteration text accumulation (needed to catch a fabricated claim uttered as preamble before a forced specialist call) also catches preamble before a genuine skill/MCP tool call, so a turn with zero specialist calls can still trip a violation row. See `orchestrator/narration_integrity.py`'s module docstring for detail.
 
 external_monitoring:
   module: openexecutive.monitoring

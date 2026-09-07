@@ -31,11 +31,26 @@ class _Dumpable:
 # Contracts: specialist enum + registration.
 # ---------------------------------------------------------------------------
 def test_specialist_enum_matches_registry() -> None:
-    """The Literal advertised to clients must equal the live roster, or callers
-    get an enum that drifts from what route_to_specialist accepts."""
-    from openexecutive.orchestrator.router import SPECIALIST_REGISTRY
+    """The Literal advertised to clients must equal the live chat-consultable
+    roster, or callers get an enum that drifts from what route_to_specialist
+    accepts.
 
-    assert set(mcp_server.specialist_keys()) == set(SPECIALIST_REGISTRY)
+    Compares against CHAT_CONSULTABLE_SPECIALISTS, not raw SPECIALIST_REGISTRY:
+    "triage" is a real registry member but deliberately, permanently excluded
+    from consult_specialist (meta-routing, not a domain specialist -- see
+    router.CHAT_CONSULTABLE_SPECIALISTS's docstring). Pinning to the raw
+    registry would make this test demand "triage" be re-added once the
+    ciso/cyberops/grc gap below is fixed, which would silently reopen that
+    gap.
+
+    KNOWN PRE-EXISTING FAILURE (unrelated to the above): specialist_keys()
+    is also missing "ciso"/"cyberops"/"grc" -- a stale enum from before those
+    specialists were added to SPECIALIST_REGISTRY, tracked separately and not
+    fixed here.
+    """
+    from openexecutive.orchestrator.router import CHAT_CONSULTABLE_SPECIALISTS
+
+    assert set(mcp_server.specialist_keys()) == set(CHAT_CONSULTABLE_SPECIALISTS)
 
 
 @pytest.mark.asyncio

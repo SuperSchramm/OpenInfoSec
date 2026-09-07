@@ -62,7 +62,7 @@ from openexecutive.orchestrator.research_tools import (
     RESEARCH_TOOLS,
 )
 from openexecutive.orchestrator.router import (
-    SPECIALIST_REGISTRY,
+    CHAT_CONSULTABLE_SPECIALISTS,
     SPECIALIST_TOOLS,
     is_off_topic,
     partition_specialist_fanout,
@@ -1436,26 +1436,25 @@ class Executive:
                         fanout_cap,
                         len(skipped_results),
                     )
-                # Only count calls that named a real registry key. An
-                # unregistered/missing `specialist` (a non-Anthropic model
-                # not honoring the tool schema's enum, or a malformed tool
-                # call) makes route_to_specialist return an "Unknown
-                # specialist: ..." string rather than raising -- without
-                # this filter that still counts as "consulted," which would
-                # permanently and silently disable narration_policy_violation
-                # for the rest of the turn despite zero real dispatch having
-                # occurred.
-                # Only count calls that named a real registry key. An
-                # unregistered/missing `specialist` (a non-Anthropic model
-                # not honoring the tool schema's enum, or a malformed tool
-                # call) makes route_to_specialist return an "Unknown
-                # specialist: ..." string rather than raising -- without
-                # this filter that still counts as "consulted," which would
-                # permanently and silently disable narration_policy_violation
-                # for the rest of the turn despite zero real dispatch having
-                # occurred.
+                # Only count calls that named a real, chat-consultable
+                # specialist. An unregistered/missing `specialist` (a
+                # non-Anthropic model not honoring the tool schema's enum, or
+                # a malformed tool call) makes route_to_specialist return an
+                # "Unknown specialist: ..." string rather than raising, and a
+                # registry member that isn't chat-consultable (e.g. "triage"
+                # -- meta-routing, not a domain specialist) gets its own
+                # rejection string -- without this filter either case still
+                # counts as "consulted," which would permanently and
+                # silently disable narration_policy_violation for the rest
+                # of the turn despite zero real dispatch having occurred.
+                # CHAT_CONSULTABLE_SPECIALISTS (not raw SPECIALIST_REGISTRY
+                # membership) is the same allowed set route_to_specialist
+                # itself validates against, so this can't drift from what
+                # actually got dispatched.
                 really_consulted = [
-                    c["specialist"] for c in run_calls if c["specialist"] in SPECIALIST_REGISTRY
+                    c["specialist"]
+                    for c in run_calls
+                    if c["specialist"] in CHAT_CONSULTABLE_SPECIALISTS
                 ]
                 specialists_consulted.extend(really_consulted)
                 if consulted_out is not None:

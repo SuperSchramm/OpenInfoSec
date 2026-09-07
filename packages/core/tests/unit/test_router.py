@@ -13,7 +13,9 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-not-used")
 
 from openexecutive.orchestrator.router import (  # noqa: E402
+    CHAT_CONSULTABLE_SPECIALISTS,
     SPECIALIST_REGISTRY,
+    SPECIALIST_TOOLS,
     route_parallel,
     route_to_specialist,
 )
@@ -106,3 +108,36 @@ def test_route_to_specialist_unknown_returns_error_string() -> None:
     """Pre-existing behaviour — guard against regression."""
     result = asyncio.run(route_to_specialist(specialist_name="nope", query="x"))
     assert "Unknown specialist" in result
+
+
+def test_route_to_specialist_rejects_triage_without_running_it() -> None:
+    """Issue #1, second symptom: "triage" IS a real SPECIALIST_REGISTRY member
+    (unlike the bogus-name case above), so a raw registry-membership check
+    lets it through. It must still be rejected -- triage is meta-routing for
+    the alert pipeline (see agents/triage.py + alerts/pipeline.py), not a
+    domain specialist a chat consult should be able to reach.
+    """
+    analyze_mock = AsyncMock(return_value="triage analysis result")
+    with patch.object(SPECIALIST_REGISTRY["triage"], "analyze", analyze_mock):
+        result = asyncio.run(
+            route_to_specialist(specialist_name="triage", query="what should I do?")
+        )
+    analyze_mock.assert_not_awaited()
+    assert "triage" in result
+    assert "not available via consult_specialist" in result
+
+
+def test_chat_consultable_specialists_excludes_triage_only() -> None:
+    """CHAT_CONSULTABLE_SPECIALISTS is SPECIALIST_REGISTRY minus exactly
+    {"triage"} -- every other registered specialist stays reachable."""
+    assert frozenset(SPECIALIST_REGISTRY) - {"triage"} == CHAT_CONSULTABLE_SPECIALISTS
+    assert "triage" not in CHAT_CONSULTABLE_SPECIALISTS
+
+
+def test_consult_specialist_tool_schema_omits_triage() -> None:
+    """Step 2's schema-level defense: the enum the model sees must not
+    advertise "triage" as a selectable consult_specialist option."""
+    schema = SPECIALIST_TOOLS[0]["input_schema"]["properties"]["specialist"]
+    assert "triage" not in schema["enum"]
+    assert set(schema["enum"]) == set(CHAT_CONSULTABLE_SPECIALISTS)
+    assert "triage" not in schema["description"]

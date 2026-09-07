@@ -4,7 +4,16 @@ Verifies that ``route_parallel`` resolves each specialist to its owning
 department via the departments registry, calls ``prefetch_department``
 with the right slug, and threads the result into the specialist's
 ``analyze(department_memory=...)`` call. Specialists without an owning
-department (e.g. ``triage``) must skip the prefetch entirely.
+department (e.g. ``gc``, stubbed with an always-None resolver below) must
+skip the prefetch entirely.
+
+Uses ``gc`` rather than ``triage`` as the "no department" example: since
+route_to_specialist now rejects ``specialist="triage"`` outright (it's
+meta-routing, not a chat-consultable domain specialist -- see
+``router.CHAT_CONSULTABLE_SPECIALISTS``), a stub registered under the
+``"triage"`` key would never reach ``analyze()`` through ``route_parallel``,
+which would make these tests fail for a reason unrelated to what they're
+actually verifying (department-memory prefetch wiring).
 """
 from __future__ import annotations
 
@@ -46,7 +55,7 @@ def stub_agents(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any
 
     monkeypatch.setitem(router.SPECIALIST_REGISTRY, "cfo", StubAgent("cfo"))
     monkeypatch.setitem(router.SPECIALIST_REGISTRY, "cmo", StubAgent("cmo"))
-    monkeypatch.setitem(router.SPECIALIST_REGISTRY, "triage", StubAgent("triage"))
+    monkeypatch.setitem(router.SPECIALIST_REGISTRY, "gc", StubAgent("gc"))
     return received
 
 
@@ -121,9 +130,9 @@ def test_specialist_without_department_skips_prefetch(
     _stub_retrievers: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Triage (and any future specialist with no owning dept) gets no
-    department_memory block — and prefetch_department is never called
-    for it."""
+    """A specialist with no owning dept (stubbed here via an always-None
+    resolver) gets no department_memory block — and prefetch_department is
+    never called for it."""
     prefetch_mock = AsyncMock(return_value="<should-not-be-used>")
     monkeypatch.setattr(
         "openexecutive.memory.honcho_client.prefetch_department",
@@ -136,13 +145,13 @@ def test_specialist_without_department_skips_prefetch(
 
     asyncio.run(
         router.route_parallel(
-            calls=[{"specialist": "triage", "query": "is this urgent?"}],
+            calls=[{"specialist": "gc", "query": "is this urgent?"}],
         )
     )
     # Prefetch was never called — the resolver returned None.
     prefetch_mock.assert_not_awaited()
     # Specialist received an empty dept-memory block.
-    assert stub_agents["triage"][0]["department_memory"] == ""
+    assert stub_agents["gc"][0]["department_memory"] == ""
 
 
 def test_mixed_specialists_only_dept_bound_get_prefetch(
@@ -150,8 +159,8 @@ def test_mixed_specialists_only_dept_bound_get_prefetch(
     _stub_retrievers: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A turn that consults both a dept-bound specialist and triage in
-    parallel must prefetch for the former and skip for the latter."""
+    """A turn that consults both a dept-bound specialist and a dept-less one
+    in parallel must prefetch for the former and skip for the latter."""
     seen_slugs: list[str | None] = []
 
     async def fake_prefetch(*, department_slug: str | None, **_: Any) -> str:
@@ -171,16 +180,16 @@ def test_mixed_specialists_only_dept_bound_get_prefetch(
         router.route_parallel(
             calls=[
                 {"specialist": "cfo", "query": "q1"},
-                {"specialist": "triage", "query": "q2"},
+                {"specialist": "gc", "query": "q2"},
             ],
         )
     )
-    # CFO triggered a prefetch with slug=finance. Triage did NOT (the
-    # resolver returns None and `_prefetch_department_for_call` short-
-    # circuits before touching Honcho).
+    # CFO triggered a prefetch with slug=finance. GC did NOT (the resolver
+    # returns None and `_prefetch_department_for_call` short-circuits before
+    # touching Honcho).
     assert seen_slugs == ["finance"]
     assert stub_agents["cfo"][0]["department_memory"] == "<mem-finance>"
-    assert stub_agents["triage"][0]["department_memory"] == ""
+    assert stub_agents["gc"][0]["department_memory"] == ""
 
 
 def test_prefetch_failure_does_not_break_specialist_call(

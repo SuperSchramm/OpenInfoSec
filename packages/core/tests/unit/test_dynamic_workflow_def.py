@@ -65,6 +65,21 @@ def test_rejects_unknown_specialist() -> None:
     assert any("unknown specialist" in e for e in errs)
 
 
+def test_rejects_triage_specialist() -> None:
+    """"triage" IS a real SPECIALIST_REGISTRY member (unlike "wizard" above),
+    so it must be rejected specifically -- not just by raw registry
+    membership. Before this test's fix, a "triage" step passed validation
+    and saved cleanly; at run time route_to_specialist rejects it, so the
+    step's output (or, if it's the synthesis step, the ENTIRE workflow
+    artifact) would silently become a rejection string instead of real
+    specialist analysis -- and dynamic workflows can run unattended on a
+    cadence, so nothing would surface that."""
+    errs = validate_definition(
+        _valid_def(steps=[_specialist("research", specialist="triage"), _synthesis()])
+    )
+    assert any("unknown specialist" in e for e in errs)
+
+
 def test_rejects_missing_synthesis() -> None:
     errs = validate_definition(_valid_def(steps=[_specialist("research")]))
     assert any("exactly one synthesis step" in e for e in errs)

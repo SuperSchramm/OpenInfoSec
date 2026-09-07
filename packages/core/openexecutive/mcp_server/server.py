@@ -43,11 +43,19 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 logger = logging.getLogger(__name__)
 
-# Sorted roster of specialist keys, kept in lockstep with
-# ``orchestrator/router.SPECIALIST_REGISTRY`` by a unit test. Declared as a
+# Sorted roster of chat-consultable specialist keys -- kept in lockstep with
+# ``orchestrator/router.CHAT_CONSULTABLE_SPECIALISTS`` (SPECIALIST_REGISTRY
+# minus "triage": meta-routing for the alert pipeline, not a domain
+# specialist -- see that constant's docstring) by a unit test. Declared as a
 # ``Literal`` so MCP clients see a proper enum in the tool schema.
+#
+# NOTE: as of this writing this Literal is ALSO missing "ciso"/"cyberops"/
+# "grc" -- a separate, already-tracked drift from when those specialists
+# were added to SPECIALIST_REGISTRY (test_specialist_enum_matches_registry
+# fails on that gap; deliberately not fixed here to keep this change scoped
+# to the "triage" validation gap it was made for).
 SpecialistKey = Literal[
-    "board_comms", "cfo", "chro", "cmo", "coo", "cpo", "cso", "gc", "talent", "triage"
+    "board_comms", "cfo", "chro", "cmo", "coo", "cpo", "cso", "gc", "talent"
 ]
 
 _INSTRUCTIONS = (
@@ -290,8 +298,7 @@ async def consult_specialist(
     economics/fundraising), chro (people/comp/org design), gc (legal/contracts/
     compliance), coo (operations/process/metrics), cmo (GTM/brand/PR), cpo
     (product/roadmap), board_comms (board decks/IR/governance), talent (executive
-    search — candidate screening/fit scoring, energy-sector talent mapping),
-    triage (chief of staff — significance of inbound events).
+    search — candidate screening/fit scoring, energy-sector talent mapping).
 
     Args:
         specialist: Which specialist to consult.
@@ -300,12 +307,12 @@ async def consult_specialist(
         context: Relevant background from your own task to ground the answer.
     """
     from openexecutive.orchestrator.router import (
-        SPECIALIST_REGISTRY,
+        CHAT_CONSULTABLE_SPECIALISTS,
         route_to_specialist,
     )
 
-    if specialist not in SPECIALIST_REGISTRY:
-        valid = ", ".join(sorted(SPECIALIST_REGISTRY))
+    if specialist not in CHAT_CONSULTABLE_SPECIALISTS:
+        valid = ", ".join(sorted(CHAT_CONSULTABLE_SPECIALISTS))
         raise ValueError(f"Unknown specialist {specialist!r}. Valid: {valid}")
     return await route_to_specialist(specialist, query, context=context)
 
@@ -567,6 +574,9 @@ async def run_session_manager() -> AsyncIterator[None]:
 def specialist_keys() -> tuple[str, ...]:
     """The specialist enum advertised in the ``consult_specialist`` schema.
 
-    Exposed for the drift test that pins it to ``SPECIALIST_REGISTRY``.
+    Exposed for the drift test that pins it to
+    ``router.CHAT_CONSULTABLE_SPECIALISTS`` (SPECIALIST_REGISTRY minus
+    "triage" -- NOT raw SPECIALIST_REGISTRY; "triage" belongs outside this
+    enum permanently, it isn't a temporary omission).
     """
     return get_args(SpecialistKey)
