@@ -18,7 +18,11 @@ const SPECIALIST_LABELS: Record<string, string> = {
   coo: "COO",
   cmo: "CMO",
   cpo: "CPO",
+  ciso: "CISO",
+  cyberops: "CyberOps",
+  grc: "GRC",
   board_comms: "BoardComms",
+  talent: "Talent",
 };
 
 const KIND_CONFIG: Record<

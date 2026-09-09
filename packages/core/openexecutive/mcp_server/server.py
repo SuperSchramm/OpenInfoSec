@@ -46,16 +46,15 @@ logger = logging.getLogger(__name__)
 # Sorted roster of chat-consultable specialist keys -- kept in lockstep with
 # ``orchestrator/router.CHAT_CONSULTABLE_SPECIALISTS`` (SPECIALIST_REGISTRY
 # minus "triage": meta-routing for the alert pipeline, not a domain
-# specialist -- see that constant's docstring) by a unit test. Declared as a
-# ``Literal`` so MCP clients see a proper enum in the tool schema.
-#
-# NOTE: as of this writing this Literal is ALSO missing "ciso"/"cyberops"/
-# "grc" -- a separate, already-tracked drift from when those specialists
-# were added to SPECIALIST_REGISTRY (test_specialist_enum_matches_registry
-# fails on that gap; deliberately not fixed here to keep this change scoped
-# to the "triage" validation gap it was made for).
+# specialist -- see that constant's docstring) by a unit test
+# (test_specialist_enum_matches_registry). This Literal previously drifted
+# from the live registry when "ciso"/"cyberops"/"grc" were added to it
+# (issue #9) -- if you add a new specialist to SPECIALIST_REGISTRY, add it
+# here too, or the drift test will catch it. Declared as a ``Literal`` so
+# MCP clients see a proper enum in the tool schema.
 SpecialistKey = Literal[
-    "board_comms", "cfo", "chro", "cmo", "coo", "cpo", "cso", "gc", "talent"
+    "board_comms", "cfo", "chro", "ciso", "cmo", "coo", "cpo", "cso",
+    "cyberops", "gc", "grc", "talent"
 ]
 
 _INSTRUCTIONS = (
@@ -298,7 +297,11 @@ async def consult_specialist(
     economics/fundraising), chro (people/comp/org design), gc (legal/contracts/
     compliance), coo (operations/process/metrics), cmo (GTM/brand/PR), cpo
     (product/roadmap), board_comms (board decks/IR/governance), talent (executive
-    search — candidate screening/fit scoring, energy-sector talent mapping).
+    search — candidate screening/fit scoring, energy-sector talent mapping), ciso
+    (security strategy, risk posture, board reporting, cross-domain security
+    governance), cyberops (SOC/IR, threat detection, OT/ICS security,
+    vulnerability management, incident response), grc (framework mapping, audit
+    prep, policy, regulatory compliance).
 
     Args:
         specialist: Which specialist to consult.

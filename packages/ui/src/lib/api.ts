@@ -868,7 +868,7 @@ export interface DynamicWorkflowDef {
   updated_at?: string;
 }
 
-// The 8 specialists a dynamic step may consult (matches SPECIALIST_REGISTRY,
+// The 12 specialists a dynamic step may consult (matches SPECIALIST_REGISTRY,
 // excluding the internal `triage` router).
 export const DYNAMIC_SPECIALISTS = [
   "cso",
@@ -878,7 +878,11 @@ export const DYNAMIC_SPECIALISTS = [
   "coo",
   "cmo",
   "cpo",
+  "ciso",
+  "cyberops",
+  "grc",
   "board_comms",
+  "talent",
 ] as const;
 
 export async function listCustomWorkflows(): Promise<DynamicWorkflowDef[]> {

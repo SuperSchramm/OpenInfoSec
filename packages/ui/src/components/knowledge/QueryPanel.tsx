@@ -22,7 +22,11 @@ const SPECIALISTS = [
   { id: "coo", label: "COO (Operations)" },
   { id: "cmo", label: "CMO (Marketing)" },
   { id: "cpo", label: "CPO (Product + Strategy)" },
+  { id: "ciso", label: "CISO (Security + Governance)" },
+  { id: "cyberops", label: "Cyber Ops (Security)" },
+  { id: "grc", label: "GRC (Governance + Compliance)" },
   { id: "board_comms", label: "Board Comms (Board + Finance)" },
+  { id: "talent", label: "Talent (HR + Strategy)" },
 ];
 
 const ALL_SOURCES: KnowledgeSourceType[] = ["builtin", "company", "failures", "external"];

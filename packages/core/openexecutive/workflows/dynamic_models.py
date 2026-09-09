@@ -38,8 +38,15 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{2,48}$")
 # importing SPECIALIST_REGISTRY at module load) to avoid an import cycle
 # workflows -> orchestrator -> workflows; validate_definition cross-checks the
 # live registry lazily so a newly added specialist is picked up automatically.
+# This is a defensive fallback only (used solely if the live import fails --
+# see _valid_specialists' except branch), so it isn't kept in perfect sync by
+# a test the way router.CHAT_CONSULTABLE_SPECIALISTS / mcp_server.SpecialistKey
+# are; still, keep it a reasonable approximation of the live registry.
 _FALLBACK_SPECIALISTS = frozenset(
-    {"cso", "cfo", "chro", "gc", "coo", "cmo", "cpo", "board_comms", "triage"}
+    {
+        "cso", "cfo", "chro", "gc", "coo", "cmo", "cpo", "ciso", "cyberops",
+        "grc", "board_comms", "talent", "triage",
+    }
 )
 
 # Bounds that keep a single definition (and its runs) cheap to store, render,

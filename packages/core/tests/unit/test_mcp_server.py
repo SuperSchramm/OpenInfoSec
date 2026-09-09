@@ -39,14 +39,13 @@ def test_specialist_enum_matches_registry() -> None:
     "triage" is a real registry member but deliberately, permanently excluded
     from consult_specialist (meta-routing, not a domain specialist -- see
     router.CHAT_CONSULTABLE_SPECIALISTS's docstring). Pinning to the raw
-    registry would make this test demand "triage" be re-added once the
-    ciso/cyberops/grc gap below is fixed, which would silently reopen that
-    gap.
+    registry would make this test demand "triage" be re-added once a future
+    specialist gap is fixed, which would silently reopen issue #1.
 
-    KNOWN PRE-EXISTING FAILURE (unrelated to the above): specialist_keys()
-    is also missing "ciso"/"cyberops"/"grc" -- a stale enum from before those
-    specialists were added to SPECIALIST_REGISTRY, tracked separately and not
-    fixed here.
+    Previously red on a real gap (issue #9): specialist_keys() was missing
+    "ciso"/"cyberops"/"grc" -- a stale enum from before those specialists
+    were added to SPECIALIST_REGISTRY. Fixed by adding them to
+    mcp_server.SpecialistKey.
     """
     from openexecutive.orchestrator.router import CHAT_CONSULTABLE_SPECIALISTS
 
