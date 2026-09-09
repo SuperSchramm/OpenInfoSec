@@ -33,9 +33,14 @@ from pydantic import BaseModel, Field, ValidationError
 from openexecutive.memory.company_profile import CompanyProfile
 from openexecutive.people.models import AuthorityScope
 
-# Org-facing specialist keys a department may map to. Anything else (or None)
-# renders as an informational department. Mirrors orchestrator.router's
-# user-facing specialists; board_comms/triage are internal and excluded.
+# Org-facing specialist keys a generated demo/onboarding fixture's department
+# may map to. Anything else (or None) renders as an informational department.
+# NOT a mirror of orchestrator.router.CHAT_CONSULTABLE_SPECIALISTS -- this is
+# a deliberately curated "classic org" subset for demo-fixture generation
+# specifically, narrower on purpose so a generated company stays a plausible
+# small-org shape. Real, chat-consultable specialists outside this set
+# (board_comms, talent, ciso, cyberops, grc) are excluded from fixture
+# generation, not from consult_specialist.
 ALLOWED_SPECIALIST_KEYS = {"cso", "cfo", "chro", "gc", "coo", "cmo", "cpo"}
 
 _SAFE_NAME_RE = re.compile(r"^[a-z0-9_-]+$")

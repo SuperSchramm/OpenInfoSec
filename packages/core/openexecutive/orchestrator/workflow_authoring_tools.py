@@ -25,6 +25,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from openexecutive.orchestrator.router import CHAT_CONSULTABLE_SPECIALISTS
 from openexecutive.orchestrator.schedule_tools import current_session
 
 logger = logging.getLogger(__name__)
@@ -95,9 +96,9 @@ DRAFT_WORKFLOW_TOOL: dict[str, Any] = {
         "confirm_token and a summary of the plan. You MUST show the summary to "
         "the user and get explicit confirmation, then call save_workflow with "
         "the SAME definition and the confirm_token. Do NOT invent specialists, "
-        "people, or metrics — only use the 8 specialist roles and people the "
-        "user has identified. If validation fails, the response lists exactly "
-        "what to fix; re-draft and try again."
+        f"people, or metrics — only use the {len(CHAT_CONSULTABLE_SPECIALISTS)} "
+        "specialist roles and people the user has identified. If validation "
+        "fails, the response lists exactly what to fix; re-draft and try again."
     ),
     "input_schema": {
         "type": "object",
