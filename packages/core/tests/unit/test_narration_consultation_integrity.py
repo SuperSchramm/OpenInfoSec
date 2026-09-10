@@ -39,7 +39,12 @@ import pytest
 from openexecutive.audit import AuditLogger, set_audit_logger
 from openexecutive.orchestrator.debug_events import DebugCollector
 from openexecutive.orchestrator.executive import Executive
-from openexecutive.orchestrator.narration_integrity import find_consultation_claim
+from openexecutive.orchestrator.narration_integrity import (
+    _ALIAS_TO_SPECIALIST_KEY,
+    find_consultation_claim,
+    narration_policy_violation,
+)
+from openexecutive.orchestrator.router import CHAT_CONSULTABLE_SPECIALISTS, SPECIALIST_REGISTRY
 
 
 class _TextBlock:
@@ -475,6 +480,71 @@ def test_triage_chat_consult_does_not_suppress_detection(audit: AuditLogger) -> 
     )
 
 
+def test_fabricated_claim_about_uninvoked_specialist_is_flagged_despite_real_consult(
+    audit: AuditLogger,
+) -> None:
+    """Issue #2 regression: the detector used to treat ``specialists_consulted``
+    as a single turn-level boolean, so a genuine consult to ANY specialist
+    this turn emptied out the check for the rest of the response -- a
+    fabricated claim naming a completely different, never-dispatched
+    specialist in the same text went undetected. Here the turn genuinely
+    consults `cfo` (`real_dispatch=True` -- real specialist_start/
+    specialist_done via `route_parallel` and executive.py's real
+    `really_consulted` filter; `route_to_specialist` itself is mocked, same
+    as `test_consultation_language_with_real_backing_log_does_not_fail`'s
+    pattern for a legitimate consult) AND the response text fabricates a
+    second claim naming `ciso`, which was never dispatched. The real cfo
+    consult must back only the cfo claim; the ciso claim must still be
+    independently checked against `specialists_consulted` and flagged.
+    """
+    provider = _ScriptedProvider(
+        [
+            _FinalMsg(
+                [
+                    _ToolUseBlock(
+                        "tu-1", "consult_specialist", {"specialist": "cfo", "query": "runway"}
+                    )
+                ],
+                stop_reason="tool_use",
+            ),
+            _FinalMsg(
+                [
+                    _TextBlock(
+                        "After checking with our CFO on runway, I'm comfortable "
+                        "with the plan. Separately, our CISO confirmed the "
+                        "incident from last week is fully contained."
+                    )
+                ],
+                stop_reason="end_turn",
+            ),
+        ]
+    )
+    collector = DebugCollector(turn_id="audit-mixed-real-and-fabricated")
+
+    response_text = _run_loop_with_collector(
+        provider,
+        "Are we good on runway, and is that incident closed out?",
+        collector,
+        real_dispatch=True,
+    )
+
+    violations = [
+        e
+        for e in audit.query(event_type="narration_policy_violation")
+        if e.turn_id == "audit-mixed-real-and-fabricated"
+    ]
+    assert violations, (
+        f"Response ({response_text!r}) fabricates a CISO consult that never "
+        "happened this turn (only cfo was actually dispatched) -- the real "
+        "cfo consult must not suppress detection of the fabricated CISO "
+        "claim (the exact false negative Issue #2 reports)"
+    )
+    assert "ciso" in violations[0].details.get("matched_phrase", "").lower(), (
+        "the flagged claim must be the CISO one, not the genuinely-backed "
+        "CFO claim -- backing is per-specialist, not per-turn"
+    )
+
+
 def test_committee_draft_fabrication_is_tagged_phase_committee_draft(
     audit: AuditLogger,
 ) -> None:
@@ -509,3 +579,150 @@ def test_committee_draft_fabrication_is_tagged_phase_committee_draft(
     ]
     assert violations, "expected a violation row for the fabricated committee draft"
     assert violations[0].details.get("phase") == "committee_draft"
+
+
+def test_multi_specialist_claim_in_one_sentence_requires_all_named_backed() -> None:
+    """Found by adversarial review: an earlier version of
+    `_resolve_claimed_specialists` (then singular, `_resolve_claimed_specialist`)
+    took only the FIRST alias found in a claim's window, so a single claim
+    naming two specialists ("I consulted our CFO and our CISO on this") let a
+    real `cfo` consult silently back a fabricated `ciso` claim riding along
+    in the same sentence -- reopening Issue #2's exact false negative under a
+    conjunction instead of a sentence break. A claim naming multiple
+    specialists must be backed only when ALL of them were really dispatched.
+    """
+    text = "I consulted our CFO and our CISO on this."
+    assert narration_policy_violation(text, ["cfo"]) is not None, (
+        "ciso is named but was never dispatched -- must still be flagged "
+        "even though cfo (also named) genuinely was"
+    )
+    assert narration_policy_violation(text, ["cfo", "ciso"]) is None, (
+        "both named specialists were genuinely dispatched -- fully backed"
+    )
+    assert narration_policy_violation(text, []) is not None
+
+
+def test_ambiguous_security_word_falls_back_to_turn_level() -> None:
+    """'security' appears in this detector's claim vocabulary (e.g.
+    "consulted our security team") but doesn't map to a single
+    SPECIALIST_REGISTRY key -- it's plausibly ciso, cyberops, or grc. A claim
+    naming only "security" must be treated as unnamed (turn-level backing:
+    flagged only when nothing was consulted at all), not guessed at.
+    """
+    text = "I consulted our security team on this."
+    assert narration_policy_violation(text, ["cfo"]) is None, (
+        "unnamed (security doesn't resolve) + a real consult elsewhere this "
+        "turn -- backed under the turn-level fallback"
+    )
+    assert narration_policy_violation(text, []) is not None
+
+
+def test_sentence_boundary_stops_alias_resolution_from_a_later_claim() -> None:
+    """An alias in a later, unrelated sentence must not be attributed to an
+    earlier unnamed claim -- `_resolve_claimed_specialists` stops scanning at
+    the first sentence terminator after the match specifically to prevent
+    this. Without that boundary, the CISO mention below would incorrectly
+    make the first (genuinely unnamed) claim resolve as a CISO claim.
+    """
+    text = "I have consulted extensively before deciding. Our CISO is out this week."
+    assert narration_policy_violation(text, []) is not None, (
+        "no real consult at all this turn -- the unnamed first claim is "
+        "unbacked regardless of the unrelated CISO mention two sentences later"
+    )
+    assert narration_policy_violation(text, ["cfo"]) is None, (
+        "a real (unrelated) consult backs the unnamed claim under the "
+        "turn-level fallback -- the CISO mention must not leak into this "
+        "claim's window and force a specific, unbacked identity onto it"
+    )
+
+
+def test_specialist_aliases_match_chat_consultable_registry() -> None:
+    """Drift guard for _ALIAS_TO_SPECIALIST_KEY, replacing the runtime filter
+    narration_integrity.py deliberately no longer applies (see its comment):
+    every alias must resolve to a real, chat-consultable specialist. A
+    typo'd or stale alias pointing at a key that's absent from
+    SPECIALIST_REGISTRY (or present but not chat-consultable, e.g. a future
+    `triage`-like meta-routing entry) would make any claim naming it
+    permanently unbackable instead of correctly checked -- silently
+    over-flagging rather than crashing, so nothing else would catch it.
+    """
+    for alias, key in _ALIAS_TO_SPECIALIST_KEY.items():
+        assert key in SPECIALIST_REGISTRY, f"alias {alias!r} maps to unknown key {key!r}"
+        assert key in CHAT_CONSULTABLE_SPECIALISTS, (
+            f"alias {alias!r} maps to {key!r}, which is not chat-consultable -- "
+            "specialists_consulted can never contain it, so a claim naming "
+            "this alias could never be backed"
+        )
+
+
+def test_newline_stops_alias_resolution_across_markdown_bullets() -> None:
+    """Found by round-2 adversarial review: LLM chat output is markdown-heavy
+    and list items routinely carry no terminal `.`/`!`/`?` at all, so an
+    80-char lookahead window bounded only by sentence punctuation walks
+    straight across the line break into the NEXT bullet's claim -- a new
+    false positive in exactly the shape the sentence boundary exists to
+    prevent. A real cfo consult must still back an unnamed claim in one
+    bullet even though a later, unrelated bullet happens to name gc (legal).
+    """
+    text = (
+        "Here's where we landed:\n\n"
+        "- I consulted the modeling work already done\n"
+        "- Legal review is still outstanding\n"
+    )
+    assert narration_policy_violation(text, ["cfo"]) is None, (
+        "the first bullet's unnamed claim is backed by the real cfo consult "
+        "under the turn-level fallback -- 'legal' from the SECOND, unrelated "
+        "bullet must not leak across the newline and force a specific, "
+        "unbacked identity onto the first claim"
+    )
+    assert narration_policy_violation(text, []) is not None, (
+        "control: with nothing consulted at all this turn, the first "
+        "bullet's unnamed claim is still correctly flagged"
+    )
+
+
+def test_lookahead_cap_does_not_scan_a_mid_word_truncation() -> None:
+    """Found by round-2 adversarial review: slicing the lookahead tail to a
+    raw _MAX_LOOKAHEAD_CHARS character count can cut a word in half, and
+    whichever fragment survives at the end of the slice can coincidentally
+    satisfy a `\\b...\\b` alias match it has no business matching (e.g. a
+    cut that lands right after "...product" out of "...products", with the
+    plural's "s" falling just past the cap). The window must be trimmed back
+    to a whole-token boundary before the alias scan runs, so truncation can
+    only ever miss an alias split across the cap -- never fabricate one.
+    """
+    padding = "x" * 71
+    text = f"I consulted {padding} products are fine."
+    assert narration_policy_violation(text, ["cfo"]) is None, (
+        "no named specialist should resolve from a truncation artifact -- "
+        "the claim must fall back to turn-level backing (and be backed by "
+        "the real cfo consult), not spuriously resolve as a 'product' claim"
+    )
+
+
+def test_specialist_aliases_cover_every_domain_word_the_patterns_recognize() -> None:
+    """The opposite direction of the drift guard above (found by round-2
+    adversarial review): a domain word present in _CONSULTATION_CLAIM_PATTERNS
+    but MISSING from _ALIAS_TO_SPECIALIST_KEY would silently downgrade any
+    claim naming it to "unnamed," making it suppressible by an unrelated real
+    consult -- the same bug shape the alias-filter removal fixed one layer up,
+    just approached from a coverage gap instead of a bad mapping. "security"
+    is the sole, deliberate exception (see module docstring: it's ambiguous
+    across ciso/cyberops/grc, so it's intentionally left unaliased).
+
+    This does NOT assert every SPECIALIST_REGISTRY member has an alias --
+    only ones the claim patterns' own vocabulary already names (e.g.
+    board_comms/cso/talent have no informal word in that vocabulary at all,
+    so there's nothing for an alias to cover there; that's accepted scope,
+    not a gap -- see the module docstring's "Deliberately narrower than the
+    full registry" note).
+    """
+    domain_words_in_patterns = {
+        "cfo", "ciso", "cyberops", "grc", "legal", "security",
+        "hr", "marketing", "product", "operations",
+    }
+    aliased_or_deliberately_excluded = set(_ALIAS_TO_SPECIALIST_KEY) | {"security"}
+    assert domain_words_in_patterns == aliased_or_deliberately_excluded, (
+        "pattern vocabulary and alias coverage have drifted -- symmetric "
+        f"difference: {domain_words_in_patterns ^ aliased_or_deliberately_excluded}"
+    )
