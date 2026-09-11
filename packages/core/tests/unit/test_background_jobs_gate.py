@@ -272,18 +272,16 @@ def test_log_grep_real_scheduler_and_resumer_startup_lines(
     monkeypatch.setenv(
         "MCP_SERVERS_CONFIG_PATH", str(tmp_path / "no-such-mcp-servers.json")
     )
-    # NOTE: this test's real run_scheduler tick reads/writes whatever DB
-    # EPISODIC_DB_PATH resolves to at import time (a module-level constant
-    # in memory.episodic, alerts.store, departments.store, etc. -- all
-    # colocated in the same physical file by convention, each frozen
-    # separately). Redirecting only one of those modules' DB_PATH desyncs
-    # it from the others (tried: broke on "no such table" from a schema
-    # created via the OLD path). Full isolation would mean monkeypatching
-    # every such module consistently to the same tmp path -- out of scope
-    # here. `_company_profile_active=False` below is what actually
-    # prevents real dispatch (claim_due_actions never runs), which is the
-    # property that matters; a stray write to whatever local dev DB this
-    # process resolves to is a much softer, accepted residual risk.
+    # NOTE: this test's real run_scheduler/run_resumer ticks read/write
+    # whatever DB EPISODIC_DB_PATH resolves to. Full multi-module isolation
+    # used to be impossible here (issue #5's frozen-at-import DB_PATH bug --
+    # fixed as of the phase closing it; see episodic.get_episodic_db_path's
+    # docstring and test_fixture_loader_honcho_reset.py's fixture for the
+    # now-working pattern). This test simply doesn't attempt it, accepting
+    # the softer residual below instead. `_company_profile_active=False`
+    # is what actually prevents real dispatch (claim_due_actions never
+    # runs), which is the property that matters; a stray write to whatever
+    # local dev DB this process resolves to is the accepted residual risk.
 
     handler, buf = _capture_openexecutive_logs()
     try:

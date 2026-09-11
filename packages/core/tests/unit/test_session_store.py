@@ -1,4 +1,5 @@
 """Unit tests for session_store helpers."""
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,30 @@ def test_save_message_with_list_content(db: Path) -> None:
     assert len(msgs) == 1
     assert msgs[0]["role"] == "assistant"
     assert isinstance(msgs[0]["content"], str)
+
+
+def test_create_session_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for issue #5 Phase 4: create_session()'s default
+    must be resolved at call time, not frozen at def time, or a
+    test-isolation monkeypatch of session_store.DB_PATH silently fails to
+    reach it -- exactly the bug api/routes/chat.py's bare calls to
+    create_session/save_message/etc. were exposed to before this fix.
+    """
+    from openexecutive.memory import episodic, session_store
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(session_store, "DB_PATH", patched_path)
+    episodic.initialize_db(patched_path)
+
+    create_session("s-bare", "Bare call test", "2024-01-01T00:00:00")  # bare call
+
+    with sqlite3.connect(str(patched_path)) as conn:
+        found = conn.execute(
+            "SELECT session_id FROM sessions WHERE session_id = ?", ("s-bare",)
+        ).fetchone()
+    assert found is not None, (
+        "create_session() must write to the current session_store.DB_PATH, "
+        "not a value frozen at import time"
+    )

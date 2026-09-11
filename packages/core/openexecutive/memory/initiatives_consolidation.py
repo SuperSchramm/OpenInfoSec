@@ -19,13 +19,26 @@ from pathlib import Path
 from typing import Any
 
 from openexecutive.memory.episodic import (
-    DB_PATH,
     Initiative,
     _get_conn,
     get_active_initiatives,
+    get_episodic_db_path,
 )
 
 logger = logging.getLogger(__name__)
+
+DB_PATH = get_episodic_db_path()
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return the caller's path or the current module-level DB_PATH.
+
+    Reading DB_PATH dynamically (not via default-arg binding) lets tests
+    monkeypatch `openexecutive.memory.initiatives_consolidation.DB_PATH`
+    and have it actually take effect — default arguments capture the
+    value at def time.
+    """
+    return db_path if db_path is not None else DB_PATH
 
 
 @dataclass
@@ -83,7 +96,7 @@ _CLUSTER_SYSTEM = (
 
 
 async def propose_clusters(
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> tuple[list[Initiative], list[Cluster]]:
     """Ask the routing model to cluster active initiatives.
 
@@ -93,7 +106,7 @@ async def propose_clusters(
     from openexecutive.config import get_settings
     from openexecutive.providers import get_provider
 
-    initiatives = get_active_initiatives(db_path=db_path)
+    initiatives = get_active_initiatives(db_path=_resolve_db_path(db_path))
     if len(initiatives) < 2:
         return initiatives, []
 
@@ -151,7 +164,7 @@ async def propose_clusters(
 
 
 def apply_clusters(
-    clusters: list[Cluster], db_path: Path = DB_PATH
+    clusters: list[Cluster], db_path: Path | None = None
 ) -> dict[str, int]:
     """Merge each cluster down to one survivor row.
 
@@ -168,7 +181,7 @@ def apply_clusters(
     merged = 0
     deleted = 0
 
-    with _get_conn(db_path) as conn:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         for cluster in clusters:
             placeholders = ",".join(["?"] * len(cluster.member_ids))

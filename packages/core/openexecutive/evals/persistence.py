@@ -10,11 +10,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from openexecutive.memory.episodic import DB_PATH, _get_conn
+from openexecutive.memory.episodic import _get_conn, get_episodic_db_path
+
+DB_PATH = get_episodic_db_path()
 
 
-def initialize_eval_runs_db(db_path: Path = DB_PATH) -> None:
-    with _get_conn(db_path) as conn:
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return the caller's path or the current module-level DB_PATH.
+
+    Reading DB_PATH dynamically (not via default-arg binding) lets tests
+    monkeypatch `openexecutive.evals.persistence.DB_PATH` and have it
+    actually take effect — default arguments capture the value at def time.
+    """
+    return db_path if db_path is not None else DB_PATH
+
+
+def initialize_eval_runs_db(db_path: Path | None = None) -> None:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS eval_runs (
@@ -41,11 +53,12 @@ def create_eval_run(
     run_id: str,
     kind: str,
     scenario_ids: list[str],
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> None:
-    initialize_eval_runs_db(db_path)
+    resolved = _resolve_db_path(db_path)
+    initialize_eval_runs_db(resolved)
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         conn.execute(
             """
             INSERT INTO eval_runs
@@ -60,10 +73,10 @@ def append_scenario_result(
     run_id: str,
     result: dict[str, Any],
     passed_delta: int,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> None:
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         row = conn.execute(
             "SELECT results, passed FROM eval_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
@@ -77,37 +90,38 @@ def append_scenario_result(
         )
 
 
-def complete_eval_run(run_id: str, db_path: Path = DB_PATH) -> None:
+def complete_eval_run(run_id: str, db_path: Path | None = None) -> None:
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute(
             "UPDATE eval_runs SET status = 'done', updated_at = ? WHERE run_id = ?",
             (now, run_id),
         )
 
 
-def fail_eval_run(run_id: str, error: str, db_path: Path = DB_PATH) -> None:
+def fail_eval_run(run_id: str, error: str, db_path: Path | None = None) -> None:
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute(
             "UPDATE eval_runs SET status = 'error', error = ?, updated_at = ? WHERE run_id = ?",
             (error, now, run_id),
         )
 
 
-def cancel_eval_run(run_id: str, db_path: Path = DB_PATH) -> None:
+def cancel_eval_run(run_id: str, db_path: Path | None = None) -> None:
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute(
             "UPDATE eval_runs SET status = 'canceled', updated_at = ? WHERE run_id = ?",
             (now, run_id),
         )
 
 
-def get_eval_run(run_id: str, db_path: Path = DB_PATH) -> dict[str, Any] | None:
-    if not db_path.exists():
+def get_eval_run(run_id: str, db_path: Path | None = None) -> dict[str, Any] | None:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return None
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         row = conn.execute(
             "SELECT * FROM eval_runs WHERE run_id = ?", (run_id,)
         ).fetchone()
@@ -126,11 +140,12 @@ def get_eval_run(run_id: str, db_path: Path = DB_PATH) -> dict[str, Any] | None:
 def list_eval_runs(
     kind: str | None = None,
     limit: int = 100,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    if not db_path.exists():
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return []
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         if kind:
             rows = conn.execute(
                 "SELECT run_id, kind, status, passed, total, created_at, updated_at "
@@ -146,10 +161,11 @@ def list_eval_runs(
     return [dict(r) for r in rows]
 
 
-def delete_eval_run(run_id: str, db_path: Path = DB_PATH) -> bool:
-    if not db_path.exists():
+def delete_eval_run(run_id: str, db_path: Path | None = None) -> bool:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return False
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         cur = conn.execute("DELETE FROM eval_runs WHERE run_id = ?", (run_id,))
         return cur.rowcount > 0
 
@@ -159,8 +175,8 @@ def delete_eval_run(run_id: str, db_path: Path = DB_PATH) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def initialize_user_scenarios_db(db_path: Path = DB_PATH) -> None:
-    with _get_conn(db_path) as conn:
+def initialize_user_scenarios_db(db_path: Path | None = None) -> None:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS eval_scenarios (
@@ -178,12 +194,13 @@ def create_user_scenario(
     scenario_id: str,
     kind: str,
     yaml_text: str,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> None:
     """Insert a new user scenario. Raises sqlite3.IntegrityError on id collision."""
-    initialize_user_scenarios_db(db_path)
+    resolved = _resolve_db_path(db_path)
+    initialize_user_scenarios_db(resolved)
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         conn.execute(
             """
             INSERT INTO eval_scenarios (id, kind, yaml, created_at, updated_at)
@@ -197,13 +214,14 @@ def update_user_scenario(
     scenario_id: str,
     kind: str,
     yaml_text: str,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> bool:
     """Update an existing user scenario. Returns False if not found."""
-    if not db_path.exists():
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return False
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         cur = conn.execute(
             "UPDATE eval_scenarios SET kind = ?, yaml = ?, updated_at = ? WHERE id = ?",
             (kind, yaml_text, now, scenario_id),
@@ -211,10 +229,11 @@ def update_user_scenario(
         return cur.rowcount > 0
 
 
-def delete_user_scenario(scenario_id: str, db_path: Path = DB_PATH) -> bool:
-    if not db_path.exists():
+def delete_user_scenario(scenario_id: str, db_path: Path | None = None) -> bool:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return False
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         cur = conn.execute(
             "DELETE FROM eval_scenarios WHERE id = ?", (scenario_id,)
         )
@@ -222,21 +241,23 @@ def delete_user_scenario(scenario_id: str, db_path: Path = DB_PATH) -> bool:
 
 
 def get_user_scenario(
-    scenario_id: str, db_path: Path = DB_PATH
+    scenario_id: str, db_path: Path | None = None
 ) -> dict[str, Any] | None:
-    if not db_path.exists():
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return None
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         row = conn.execute(
             "SELECT * FROM eval_scenarios WHERE id = ?", (scenario_id,)
         ).fetchone()
     return dict(row) if row else None
 
 
-def list_user_scenarios(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
-    if not db_path.exists():
+def list_user_scenarios(db_path: Path | None = None) -> list[dict[str, Any]]:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return []
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         # Defensive: table may not exist yet on a fresh deploy. Create it
         # if missing so `load_scenarios()` doesn't crash.
         conn.execute(

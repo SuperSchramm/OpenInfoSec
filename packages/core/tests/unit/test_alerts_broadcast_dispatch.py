@@ -415,3 +415,33 @@ async def test_mixed_channels_routes_each_correctly(
     assert "web" in delivered
     assert "persisted" in delivered
     assert "department_channel" in delivered
+
+
+@pytest.mark.asyncio
+async def test_dispatch_all_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for issue #5 Phase 4: dispatch_all()'s default must
+    be resolved at call time, not frozen at def time, or a test-isolation
+    monkeypatch of alerts.dispatcher.DB_PATH silently fails to reach it.
+    """
+    db = tmp_path / "alerts.db"
+    monkeypatch.setattr(store, "DB_PATH", db)
+    monkeypatch.setattr(dispatcher, "DB_PATH", db)
+    store.initialize_db(db)
+
+    alert = _make_alert()
+    alert.id = store.insert_alert(
+        source=alert.source, external_id="ext-bare", severity=alert.severity,
+        headline=alert.headline, body=alert.body, dedup_key="test-bare",
+        db_path=db,
+    )
+
+    await dispatcher.dispatch_all(alert, [AlertChannel.PERSISTED])  # bare call
+
+    stored = store.list_alerts(db_path=db)
+    matching = [a for a in stored if a.id == alert.id]
+    assert matching and "persisted" in matching[0].channels_delivered, (
+        "dispatch_all() must write channels_delivered via the current "
+        "alerts.dispatcher.DB_PATH, not a value frozen at import time"
+    )

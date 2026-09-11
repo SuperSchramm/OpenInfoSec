@@ -142,3 +142,24 @@ async def test_propose_clusters_returns_empty_for_singleton_db(
     assert len(initiatives) == 1
     assert clusters == []
     create_mock.assert_not_called()
+
+
+def test_apply_clusters_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for issue #5 Phase 4: apply_clusters()'s default
+    must be resolved at call time, not frozen at def time, or a
+    test-isolation monkeypatch of initiatives_consolidation.DB_PATH
+    silently fails to reach it.
+    """
+    from openexecutive.memory import initiatives_consolidation
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(initiatives_consolidation, "DB_PATH", patched_path)
+
+    apply_clusters([])  # bare call, no explicit db_path
+
+    assert patched_path.exists(), (
+        "apply_clusters() must connect via the current "
+        "initiatives_consolidation.DB_PATH, not a value frozen at import time"
+    )

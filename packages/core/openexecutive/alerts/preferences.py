@@ -11,7 +11,20 @@ from openexecutive.alerts.models import (
     AlertSeverity,
     UserPreferences,
 )
-from openexecutive.alerts.store import DB_PATH, _get_conn  # noqa: PLC2701
+from openexecutive.alerts.store import _get_conn  # noqa: PLC2701
+from openexecutive.memory.episodic import get_episodic_db_path
+
+DB_PATH = get_episodic_db_path()
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return the caller's path or the current module-level DB_PATH.
+
+    Reading DB_PATH dynamically (not via default-arg binding) lets tests
+    monkeypatch `openexecutive.alerts.preferences.DB_PATH` and have it
+    actually take effect — default arguments capture the value at def time.
+    """
+    return db_path if db_path is not None else DB_PATH
 
 
 def _row_to_prefs(row: sqlite3.Row) -> UserPreferences:
@@ -33,20 +46,21 @@ def _row_to_prefs(row: sqlite3.Row) -> UserPreferences:
     )
 
 
-def get_preferences(db_path: Path = DB_PATH) -> UserPreferences:
-    if not db_path.exists():
+def get_preferences(db_path: Path | None = None) -> UserPreferences:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return UserPreferences()
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         row = conn.execute("SELECT * FROM user_preferences WHERE id = 1").fetchone()
     if not row:
         return UserPreferences()
     return _row_to_prefs(row)
 
 
-def save_preferences(prefs: UserPreferences, db_path: Path = DB_PATH) -> UserPreferences:
+def save_preferences(prefs: UserPreferences, db_path: Path | None = None) -> UserPreferences:
     channels_csv = ",".join(c.value for c in prefs.channels_enabled)
     now = datetime.now(UTC).isoformat()
-    with _get_conn(db_path) as conn:
+    with _get_conn(_resolve_db_path(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO user_preferences

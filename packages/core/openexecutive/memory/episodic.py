@@ -143,61 +143,38 @@ def get_episodic_db_path() -> Path:
 
     Reads the current `DB_PATH` module global at call time, not a value
     captured at import time, so `monkeypatch.setattr(episodic, "DB_PATH", ...)`
-    reaches every caller in this file that resolves lazily through this
-    function (or through `_resolve_db_path`/`_get_conn`). See issue #5.
+    reaches every caller in this file. See issue #5 (closed as of this
+    function's last phase — every module that reads `EPISODIC_DB_PATH`
+    now does so through here).
 
-    Nine other modules (`alerts.store`, `people.store`, `departments.store`,
-    `talent.store`, `staff_onboarding.store`, `fixtures.store`,
-    `architecture.cache`, `audit.logger`, `knowledge.review_store`) call
-    this once, at their own import time, to compute their own `DB_PATH`
-    attribute's initial value in place of an independent env-read (or, for
-    `architecture.cache`, in place of a frozen value-copy of this module's
-    old `DB_PATH`). `audit.logger`/`knowledge.review_store` (Phase 3) also
-    each gained their own `_resolve_db_path`, having previously bound
-    `db_path` as an eager default on their construction/`initialize_db`
-    paths — the same bug class Phase 1 fixed here.
+    14 other modules call this once, at their own import time, to seed
+    their own `DB_PATH` attribute, replacing independent env-reads:
+    `alerts.store`, `people.store`, `departments.store`, `talent.store`,
+    `staff_onboarding.store`, `fixtures.store`, `architecture.cache`
+    (Phase 2); `audit.logger`, `knowledge.review_store` (Phase 3);
+    `evals.persistence`, `memory.session_store`,
+    `memory.initiatives_consolidation`, `alerts.preferences`,
+    `alerts.dispatcher` (Phase 4). This does NOT propagate isolation
+    across modules: each keeps its own `DB_PATH`, resolved at call time by
+    its own `_resolve_db_path`, never re-calling this function. Isolating
+    a module still requires `monkeypatch.setattr(<module>, "DB_PATH",
+    ...)` on that module specifically.
 
-    This does NOT propagate isolation across modules once one is imported:
-    each keeps its own `DB_PATH` attribute, resolved at call time by its
-    own `_resolve_db_path`/`_get_conn`, never re-calling this function.
-    Isolating a module still requires `monkeypatch.setattr(<module>,
-    "DB_PATH", ...)` on that module specifically — exactly what every
-    existing test already does.
-
-    Known caveat, left as documented tech debt rather than fixed: if a
-    test rebinds `episodic.DB_PATH` and THEN triggers a module's very
-    first import, that module inherits the rebound value instead of the
-    real default, for the rest of that process. This bites any module
-    whose first import in a given pytest run isn't guaranteed before the
-    first `episodic.DB_PATH` rebind — which, empirically, is not just
-    `fixtures.store`, `talent.store`, and `staff_onboarding.store` (Phase 2)
-    but also `audit.logger` and `knowledge.review_store` (Phase 3): each
-    DOES have an eager importer somewhere (`audit/__init__.py`;
-    `api/routes/review.py`/`knowledge/retriever.py`), but that only
-    protects a run where something already imports that importer — a
-    narrow/single-file/`-k` run that doesn't can still hit a module's
-    first-ever import lazily, after some other test in the same run has
-    already rebound `episodic.DB_PATH`. Reproduced directly: e.g.
-    `pytest tests/unit/test_chat_route_page_context.py` alone leaves
-    `knowledge.review_store.DB_PATH` pinned to that run's `tmp_path` at
-    the end of the session. Confirmed harmless for every whole-suite run
-    today (some other collected file always imports each of these first,
-    before any monkeypatch fires) and for production (nothing here ever
-    reassigns `DB_PATH` at runtime). Fixing it for real would mean these
-    5 modules' own `_resolve_db_path` deferring to this function at call
-    time instead of reading their own local `DB_PATH` — which would cost
-    every test that currently does `monkeypatch.setattr(<module>,
-    "DB_PATH", ...)` on one of these 5 modules its isolation mechanism
-    (Phase 2 estimated ~56 such call sites for its 3; Phase 3 adds more).
-    Out of proportion to a risk with no production or whole-suite impact —
-    left as documented tech debt across all 5, not fixed, pending a
-    decision on whether it's worth the test-suite-wide change.
-
-    Not yet unified: several downstream modules (`evals.persistence`,
+    Known, deliberately-undone caveat: a test that rebinds
+    `episodic.DB_PATH` and then triggers one of 10 modules' very first
+    import (`fixtures.store`, `talent.store`, `staff_onboarding.store`,
+    `audit.logger`, `knowledge.review_store`, `evals.persistence`,
     `memory.session_store`, `memory.initiatives_consolidation`,
-    `alerts.preferences`, `alerts.dispatcher`, among others) still freeze a
-    copy of some module's `DB_PATH` into their own eager function
-    defaults — issue #5's remaining phase.
+    `alerts.preferences`, `alerts.dispatcher`) makes that module inherit
+    the rebound value instead of the real default. Harmless today — no
+    whole-suite run or production path triggers it (verified directly for
+    `knowledge.review_store` via `pytest
+    tests/unit/test_chat_route_page_context.py` alone). Structurally
+    fixing it would cost every test that monkeypatches one of these
+    modules' own `DB_PATH` its isolation mechanism (~56+ call sites) —
+    left undone by design, not oversight. `alerts.store`, `people.store`,
+    `departments.store`, `architecture.cache` don't carry this caveat —
+    each has an importer that's unconditionally reached.
     """
     return DB_PATH
 

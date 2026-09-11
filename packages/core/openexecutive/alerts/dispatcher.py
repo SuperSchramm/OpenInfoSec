@@ -5,9 +5,22 @@ from pathlib import Path
 
 from openexecutive.alerts import sse_bus
 from openexecutive.alerts.models import Alert, AlertChannel
-from openexecutive.alerts.store import DB_PATH, update_delivery
+from openexecutive.alerts.store import update_delivery
+from openexecutive.memory.episodic import get_episodic_db_path
 
 logger = logging.getLogger(__name__)
+
+DB_PATH = get_episodic_db_path()
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return the caller's path or the current module-level DB_PATH.
+
+    Reading DB_PATH dynamically (not via default-arg binding) lets tests
+    monkeypatch `openexecutive.alerts.dispatcher.DB_PATH` and have it
+    actually take effect — default arguments capture the value at def time.
+    """
+    return db_path if db_path is not None else DB_PATH
 
 
 def _alert_to_event(alert: Alert) -> dict:
@@ -239,7 +252,7 @@ _SIMPLE_DISPATCHERS = {
 async def dispatch_all(
     alert: Alert,
     channels: list[AlertChannel],
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
     *,
     department_slug: str = "",
     broadcast_integration: str = "",
@@ -281,5 +294,5 @@ async def dispatch_all(
         if ok:
             delivered.append(ch.value)
     if alert.id is not None:
-        update_delivery(alert.id, attempted, delivered, db_path=db_path)
+        update_delivery(alert.id, attempted, delivered, db_path=_resolve_db_path(db_path))
     return attempted, delivered

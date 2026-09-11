@@ -217,3 +217,28 @@ def test_in_quiet_hours_wraparound_window() -> None:
     assert _in_quiet_hours(prefs, now=datetime(2030, 1, 1, 3, 0, tzinfo=UTC))
     # 12:00 UTC — outside.
     assert not _in_quiet_hours(prefs, now=datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+
+
+def test_get_preferences_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for issue #5 Phase 4: get_preferences()'s default
+    must be resolved at call time, not frozen at def time, or a
+    test-isolation monkeypatch of alerts.preferences.DB_PATH silently
+    fails to reach it.
+    """
+    from openexecutive.alerts import preferences as alerts_preferences
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(alerts_preferences, "DB_PATH", patched_path)
+    initialize_db(patched_path)
+    save_preferences(
+        UserPreferences(severity_threshold=AlertSeverity.HIGH), db_path=patched_path
+    )
+
+    prefs = alerts_preferences.get_preferences()  # bare call, no explicit db_path
+
+    assert prefs.severity_threshold == AlertSeverity.HIGH, (
+        "get_preferences() must read from the current "
+        "alerts.preferences.DB_PATH, not a value frozen at import time"
+    )
