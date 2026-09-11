@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -23,9 +22,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from openexecutive.memory.episodic import get_episodic_db_path
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(os.environ.get("EPISODIC_DB_PATH") or "./episodic_memory.db")
+DB_PATH = get_episodic_db_path()
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return the caller's path or the current module-level DB_PATH.
+
+    Reading DB_PATH dynamically (not via default-arg binding) lets tests
+    monkeypatch `openexecutive.audit.logger.DB_PATH` and have it actually
+    take effect — default arguments capture the value at def time.
+    """
+    return db_path if db_path is not None else DB_PATH
 
 # Cap summaries so a runaway tool input/output doesn't bloat the index.
 _SUMMARY_MAX_LEN = 300
@@ -188,8 +199,8 @@ class AuditLogger:
     and return — auditing never blocks or breaks the caller.
     """
 
-    def __init__(self, db_path: Path = DB_PATH) -> None:
-        self._db_path = db_path
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = _resolve_db_path(db_path)
         self.initialize_db()
 
     def initialize_db(self) -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 import uuid
 from collections.abc import Generator
@@ -12,7 +11,19 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-DB_PATH = Path(os.environ.get("EPISODIC_DB_PATH", "./episodic_memory.db"))
+from openexecutive.memory.episodic import get_episodic_db_path
+
+DB_PATH = get_episodic_db_path()
+
+
+def _resolve_db_path(db_path: Path | None) -> Path:
+    """Return the caller's path or the current module-level DB_PATH.
+
+    Reading DB_PATH dynamically (not via default-arg binding) lets tests
+    monkeypatch `openexecutive.knowledge.review_store.DB_PATH` and have it
+    actually take effect — default arguments capture the value at def time.
+    """
+    return db_path if db_path is not None else DB_PATH
 
 PRIORITY_ORDER: dict[str, int] = {"high": 0, "normal": 1, "low": 2}
 
@@ -62,8 +73,8 @@ class Annotation(BaseModel):
 
 
 @contextmanager
-def _get_conn(db_path: Path = DB_PATH) -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(str(db_path))
+def _get_conn(db_path: Path | None = None) -> Generator[sqlite3.Connection, None, None]:
+    conn = sqlite3.connect(str(_resolve_db_path(db_path)))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -100,11 +111,11 @@ def _row_to_annotation(row: sqlite3.Row) -> Annotation:
 
 
 class ReviewStore:
-    def __init__(self, db_path: Path = DB_PATH) -> None:
-        self._db_path = db_path
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = _resolve_db_path(db_path)
 
     @staticmethod
-    def initialize_db(db_path: Path = DB_PATH) -> None:
+    def initialize_db(db_path: Path | None = None) -> None:
         with _get_conn(db_path) as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS review_items (
@@ -138,7 +149,7 @@ class ReviewStore:
             """)
 
     @staticmethod
-    def sync_builtin_registrations(db_path: Path = DB_PATH) -> int:
+    def sync_builtin_registrations(db_path: Path | None = None) -> int:
         """INSERT OR IGNORE for every .md file in knowledge/builtin/ (excluding skills/).
 
         Idempotent — safe to call on every startup. Returns number of new registrations.
@@ -166,7 +177,7 @@ class ReviewStore:
 
     @staticmethod
     def sync_external_registrations(
-        ingested_source_ids: list[dict[str, Any]], db_path: Path = DB_PATH
+        ingested_source_ids: list[dict[str, Any]], db_path: Path | None = None
     ) -> int:
         """INSERT OR IGNORE for all ingested OER sources. Returns new registration count."""
         now = datetime.now(UTC).isoformat()

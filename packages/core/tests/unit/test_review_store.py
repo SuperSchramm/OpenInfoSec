@@ -260,3 +260,37 @@ def test_count_by_status(store: ReviewStore) -> None:
     assert counts["pending"] == 1
     assert counts["approved"] == 1
     assert counts["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# issue #5 Phase 3 — bare calls must follow a monkeypatched DB_PATH
+# ---------------------------------------------------------------------------
+
+
+def test_initialize_db_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: ReviewStore.initialize_db()'s default must be
+    resolved at call time, not frozen at def time, or a test-isolation
+    monkeypatch of review_store.DB_PATH silently fails to reach it.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    from openexecutive.knowledge import review_store
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(review_store, "DB_PATH", patched_path)
+
+    ReviewStore.initialize_db()  # bare call, no explicit db_path
+
+    assert patched_path.exists(), (
+        "initialize_db() must create its schema at the current "
+        "review_store.DB_PATH, not a value frozen at import time"
+    )
+    with closing(sqlite3.connect(str(patched_path))) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "review_items" in tables and "review_annotations" in tables

@@ -323,3 +323,29 @@ def test_usage_summary_respects_time_window(tmp_path: Path) -> None:
     )
     assert windowed["totals"]["calls"] == 1
     assert windowed["totals"]["input_tokens"] == 99
+
+
+# --------------------------------------------------------------------------- #
+# issue #5 Phase 3 — bare calls must follow a monkeypatched DB_PATH
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_construction_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for issue #5 Phase 3: AuditLogger()'s default must be
+    resolved at call time, not frozen at def time, or a test-isolation
+    monkeypatch of audit.logger.DB_PATH silently fails to reach it.
+    """
+    from openexecutive.audit import logger as audit_logger
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(audit_logger, "DB_PATH", patched_path)
+
+    instance = audit_logger.AuditLogger()  # bare call, no explicit db_path
+
+    assert instance._db_path == patched_path
+    assert patched_path.exists(), (
+        "AuditLogger() must create its schema at the current "
+        "audit.logger.DB_PATH, not a value frozen at import time"
+    )
