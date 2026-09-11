@@ -146,13 +146,45 @@ def get_episodic_db_path() -> Path:
     reaches every caller in this file that resolves lazily through this
     function (or through `_resolve_db_path`/`_get_conn`). See issue #5.
 
-    NOT yet a single source of truth across the codebase: several other
-    modules (`alerts.store`, `people.store`, `departments.store`,
-    `talent.store`, `staff_onboarding.store`, `fixtures.store`,
-    `knowledge.review_store`, `audit.logger`) still independently read
-    `EPISODIC_DB_PATH` from the environment into their own `DB_PATH`, and a
-    few more freeze a copy of *this* module's `DB_PATH` at their own import
-    time. Unifying those is issue #5's later phases, not yet done.
+    As of issue #5 Phase 2, seven other modules (`alerts.store`,
+    `people.store`, `departments.store`, `talent.store`,
+    `staff_onboarding.store`, `fixtures.store`, `architecture.cache`) call
+    this function once, at their own import time, to compute their OWN
+    `DB_PATH` module attribute's initial value — replacing what used to be
+    seven independent copies of the same `os.environ.get("EPISODIC_DB_PATH",
+    ...)` expression (or, for `architecture.cache`, a frozen value-copy
+    import of this module's `DB_PATH`) with one canonical place that knows
+    how to compute the default.
+
+    This does NOT give those seven modules cross-module test-isolation
+    propagation FOR A MODULE THAT'S ALREADY IMPORTED. Each keeps its own
+    independent `DB_PATH` module attribute, still resolved at call time by
+    that module's OWN `_resolve_db_path`/`_get_conn` — none of them call
+    this function again after their initial import. So once a module is
+    in `sys.modules` (true for all seven by the time any test function
+    runs, in every whole-suite run today — each has its own eager
+    module-level importer somewhere in app code or in its own test file),
+    monkeypatching `episodic.DB_PATH` alone does not reach it; isolating
+    it still requires `monkeypatch.setattr(<that module>, "DB_PATH", ...)`
+    on that module specifically, exactly as every existing test already
+    does.
+
+    The one case where this DOES matter: if a test rebinds `episodic.
+    DB_PATH` and then triggers a module's very FIRST import afterward
+    (e.g. via a lazily-imported route handler, in a narrow `-k`/single-file
+    run that skips whatever normally imports that module first), that
+    module's `DB_PATH` inherits the rebound value instead of the real
+    default — a test-ordering hazard the old independent-env-read design
+    didn't have. Isolating that module explicitly (as above) avoids it
+    regardless of import order.
+
+    `knowledge.review_store` and `audit.logger` still independently read
+    `EPISODIC_DB_PATH` from the environment into their own `DB_PATH`, and
+    several downstream modules (`evals.persistence`, `memory.session_store`,
+    `memory.initiatives_consolidation`, `alerts.preferences`,
+    `alerts.dispatcher`, among others) freeze a copy of some module's
+    `DB_PATH` value into their own eager function-default arguments.
+    Addressing those is issue #5's later phases, not yet done.
     """
     return DB_PATH
 

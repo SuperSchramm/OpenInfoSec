@@ -12,13 +12,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from openexecutive.memory.episodic import get_episodic_db_path
 from openexecutive.people.models import (
     AuthorityScope,
     AvailabilityWindow,
@@ -28,7 +28,7 @@ from openexecutive.people.models import (
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(os.environ.get("EPISODIC_DB_PATH", "./episodic_memory.db"))
+DB_PATH = get_episodic_db_path()
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:

@@ -18,7 +18,6 @@ codebase (see ``memory/episodic.py``).
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -26,7 +25,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path(os.environ.get("EPISODIC_DB_PATH", "./episodic_memory.db"))
+from openexecutive.memory.episodic import get_episodic_db_path
+
+DB_PATH = get_episodic_db_path()
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:

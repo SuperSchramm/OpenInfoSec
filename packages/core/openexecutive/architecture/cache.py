@@ -18,11 +18,11 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from openexecutive.memory.episodic import DB_PATH as _EPISODIC_DB_PATH
+from openexecutive.memory.episodic import get_episodic_db_path
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = _EPISODIC_DB_PATH
+DB_PATH = get_episodic_db_path()
 
 
 class SectionContent(BaseModel):
