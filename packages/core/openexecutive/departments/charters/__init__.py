@@ -1,6 +1,6 @@
-"""Seed charter text for the 8 default departments.
+"""Seed charter text for the 11 default departments.
 
-Phase 1 fleshes out Finance only; the other 7 ship as two-line stubs that
+Phase 1 fleshes out Finance only; the other 10 ship as two-line stubs that
 later phases (and humans editing through the UI) will fill in. Charters are
 read once at seed time and persisted into the `departments` table — editing
 a charter at runtime goes through the PATCH route, not by editing this file.
@@ -11,7 +11,7 @@ from openexecutive.departments.models import DepartmentCharter
 
 # Cadence spec used when seeding fresh departments. Phase 5 parses these
 # strings; until then they are just text on the row. Centralised here so the
-# eight seed entries below stay in sync.
+# eleven seed entries below stay in sync.
 DEFAULT_CHECK_IN_CADENCE: str = "daily@09:00"
 
 FINANCE_CHARTER = DepartmentCharter(

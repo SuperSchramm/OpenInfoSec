@@ -71,7 +71,7 @@ async def fixtures_snapshot(request: Request) -> dict:
 async def fixtures_reset(request: Request) -> dict:
     """Wipe live state AND the snapshot — irreversible factory reset.
 
-    Re-seeds the 8 default specialist departments so the user has a
+    Re-seeds the 11 default specialist departments so the user has a
     sensible starting org instead of a blank departments page. The
     shared ChromaDB store on ``app.state`` is swapped inside the
     destructive-op lock to avoid a race where a concurrent reader could

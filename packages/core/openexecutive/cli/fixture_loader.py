@@ -584,7 +584,7 @@ async def reset_all_state(
     """Wipe live state AND the snapshot — return to factory-default.
 
     Intentionally destructive. Unlike unload, there is no path back from
-    this. Re-seeds the 8 default specialist departments after wiping so the
+    this. Re-seeds the 11 default specialist departments after wiping so the
     user sees a sensible starting org instead of a blank departments page.
 
     ``app_state`` (optional) is FastAPI's ``request.app.state``; when
@@ -601,7 +601,7 @@ async def reset_all_state(
          (workflow_runs, audit_log, eval_runs) so /jobs and /audit reset
          too
       4. DELETE people + child tables (authority scope, availability)
-      5. DELETE departments + Goals, then re-seed 8 default departments
+      5. DELETE departments + Goals, then re-seed 11 default departments
       5a. Re-bootstrap principal briefs, department cadences, and (if
           enabled) the nudge-scan heartbeat — without this Today stays
           blank until the next API restart

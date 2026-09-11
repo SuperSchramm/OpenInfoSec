@@ -705,7 +705,7 @@ export default function DemoPage() {
                   </h3>
                   <p className="text-xs text-fg-muted mt-1 leading-relaxed">
                     Clears your live company data <em>and</em> the snapshot.
-                    Re-seeds the 8 default specialist departments so you start
+                    Re-seeds the 11 default specialist departments so you start
                     from a sensible blank slate. There is no undo.
                   </p>
                 </div>

@@ -5,7 +5,7 @@ so there is one place to look. Schema is created idempotently via
 `CREATE TABLE IF NOT EXISTS` (no migration tooling in this repo).
 
 Department-level data is read on every Executive turn (Phase 2 prompt block)
-so the store must stay cheap; queries are unindexed for now (8 rows).
+so the store must stay cheap; queries are unindexed for now (11 rows).
 """
 from __future__ import annotations
 
@@ -403,13 +403,13 @@ def _mark_defaults_seeded(conn: sqlite3.Connection, now: str) -> None:
 
 
 def seed_default_departments(db_path: Path | None = None) -> int:
-    """Insert the 8 default departments on first run only.
+    """Insert the 11 default departments on first run only.
 
     Seeding happens exactly once per database, tracked by the
     ``default_departments_seeded`` row in ``departments_meta``. After that
     first run the user owns the department list: departments they delete stay
     deleted across restarts, and the defaults are never re-inserted. Returns
-    the number of rows newly inserted (8 on a fresh DB, 0 thereafter).
+    the number of rows newly inserted (11 on a fresh DB, 0 thereafter).
 
     A database that predates the sentinel but already holds departments is
     treated as already-seeded — its current state is adopted as the baseline

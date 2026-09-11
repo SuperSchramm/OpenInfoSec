@@ -927,7 +927,7 @@ departments:
     `bootstrap_cadences`) to cancel pending cadences whose department no
     longer exists — so a removed department stops firing check-in alerts.
   seeding: |
-    openexecutive.departments.store.seed_default_departments — the 8
+    openexecutive.departments.store.seed_default_departments — the 11
     default departments are seeded exactly once per database on first
     boot, tracked by the `default_departments_seeded` row in the
     `departments_meta` table. After that the user owns the list:
@@ -971,7 +971,7 @@ departments:
     channel-columns migration). Every workflow run emits a single
     `goal_status_review` audit row tagged `actor=department_check_in`,
     `department=<slug>`, with `details.transitions = [{goal_id, from,
-    to, rationale}, ...]` — keeping audit volume bounded (~8 rows/day
+    to, rationale}, ...]` — keeping audit volume bounded (~11 rows/day
     default). Always overwrites: the diff trail lives in audit, and the
     principal retains the manual UI edit path as the final override.
     The Honcho mirror fires inside `record_goal_review` with
@@ -2770,7 +2770,7 @@ clients:
     materialize_to_dir). No state.db; live state untouched; not activated.
     On first activation the blank-restore path applies the seed files with
     the fixture loader's seeders (people → memory → departments, so heads
-    and assigned ids resolve by name) and skips the default 8-department
+    and assigned ids resolve by name) and skips the default 11-department
     reseed when the draft supplied an org (brief/cadence bootstraps still
     run and pick up the seeded departments). After the first save-back
     writes state.db, the seed files remain as the engagement's birth record

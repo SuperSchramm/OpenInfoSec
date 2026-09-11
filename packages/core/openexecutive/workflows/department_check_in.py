@@ -247,7 +247,7 @@ class DepartmentCheckInWorkflow(Workflow):
 
         if transitions:
             # Single audit row per workflow run keeps audit volume sane
-            # (~8 rows/day default across the seeded departments).
+            # (~11 rows/day default across the seeded departments).
             try:
                 get_audit_logger().log(
                     "goal_status_review",

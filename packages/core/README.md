@@ -4,7 +4,7 @@ An open-source AI system that acts as your company's virtual executive team — 
 
 ## What It Does
 
-Open Executive provides a single coherent executive voice backed by eight specialist AI agents:
+Open Executive provides a single coherent executive voice backed by twelve specialist AI agents:
 
 - **Chief Strategy Officer** — competitive analysis, M&A, market positioning, OKRs
 - **Chief Financial Officer** — financial modeling, fundraising, unit economics, cash flow
@@ -13,7 +13,11 @@ Open Executive provides a single coherent executive voice backed by eight specia
 - **Chief Operating Officer** — process design, vendor management, operational scaling
 - **Chief Marketing Officer** — GTM strategy, brand, communications, PR
 - **Chief Product Officer** — roadmap, prioritization, product strategy
+- **Chief Information Security Officer** — security strategy, risk posture, board reporting
+- **Director of Cyber Operations** — threat detection, incident response, OT/ICS security
+- **Director of Governance, Risk & Compliance** — framework mapping, audit prep, regulatory compliance
 - **Board Communications Director** — board decks, investor relations, governance
+- **Head of Talent & Executive Search** — candidate screening, executive sourcing, talent-market mapping
 
 All responses come from one consistent executive voice. The internal agent architecture is never exposed to the user.
 

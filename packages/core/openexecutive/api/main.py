@@ -222,7 +222,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from openexecutive.staff_onboarding.seed import seed_default_templates
     seed_default_templates()
 
-    # Departments: persistent state layer over the 8 specialist agents. Init
+    # Departments: persistent state layer over the 11 specialist agents. Init
     # AFTER episodic_db so the additive ALTERs (department column on decisions,
     # initiatives, advice_given, scheduled_actions) have already run by the
     # time anything else writes to those tables.

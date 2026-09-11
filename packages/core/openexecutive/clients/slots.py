@@ -553,7 +553,7 @@ def _reseed_blank_defaults(*, seed_departments: bool = True) -> None:
     Mirrors ``reset_all_state`` step 5/5a — without these the new client's
     Today page stays blank until the next process restart. Every call is
     idempotent and individually guarded. ``seed_departments=False`` skips the
-    default 8-department org (used when a generated seed slot supplied its
+    default 11-department org (used when a generated seed slot supplied its
     own departments — the cadence/brief bootstraps still run and pick those
     up from the table).
     """
