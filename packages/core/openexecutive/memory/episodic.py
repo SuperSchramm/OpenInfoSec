@@ -138,9 +138,28 @@ class OutboundContext(BaseModel):
 DB_PATH = Path(os.environ.get("EPISODIC_DB_PATH", "./episodic_memory.db"))
 
 
+def get_episodic_db_path() -> Path:
+    """Resolve the episodic-memory SQLite path for this module's own callers.
+
+    Reads the current `DB_PATH` module global at call time, not a value
+    captured at import time, so `monkeypatch.setattr(episodic, "DB_PATH", ...)`
+    reaches every caller in this file that resolves lazily through this
+    function (or through `_resolve_db_path`/`_get_conn`). See issue #5.
+
+    NOT yet a single source of truth across the codebase: several other
+    modules (`alerts.store`, `people.store`, `departments.store`,
+    `talent.store`, `staff_onboarding.store`, `fixtures.store`,
+    `knowledge.review_store`, `audit.logger`) still independently read
+    `EPISODIC_DB_PATH` from the environment into their own `DB_PATH`, and a
+    few more freeze a copy of *this* module's `DB_PATH` at their own import
+    time. Unifying those is issue #5's later phases, not yet done.
+    """
+    return DB_PATH
+
+
 @contextmanager
-def _get_conn(db_path: Path = DB_PATH) -> Generator[sqlite3.Connection, None, None]:
-    conn = sqlite3.connect(str(db_path))
+def _get_conn(db_path: Path | None = None) -> Generator[sqlite3.Connection, None, None]:
+    conn = sqlite3.connect(str(_resolve_db_path(db_path)))
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -149,7 +168,7 @@ def _get_conn(db_path: Path = DB_PATH) -> Generator[sqlite3.Connection, None, No
         conn.close()
 
 
-def initialize_db(db_path: Path = DB_PATH) -> None:
+def initialize_db(db_path: Path | None = None) -> None:
     with _get_conn(db_path) as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS decisions (
@@ -421,7 +440,7 @@ def store_decision(
     department: str = "",
     session_id: str = "",
     person_id: int | None = None,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> None:
     now = datetime.now(UTC)
     dedup_window_start = (now - timedelta(days=7)).isoformat()
@@ -468,7 +487,7 @@ def store_initiative(
     summary: str = "",
     department: str = "",
     person_id: int | None = None,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> None:
     now = datetime.now(UTC).isoformat()
     is_insert = False
@@ -521,7 +540,7 @@ def store_advice(
     department: str = "",
     session_id: str = "",
     person_id: int | None = None,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> None:
     now = datetime.now(UTC)
     dedup_window_start = (now - timedelta(days=7)).isoformat()
@@ -593,10 +612,11 @@ def get_recent_decisions(
     return [Decision(**dict(row)) for row in rows]
 
 
-def get_active_initiatives(db_path: Path = DB_PATH) -> list[Initiative]:
-    if not db_path.exists():
+def get_active_initiatives(db_path: Path | None = None) -> list[Initiative]:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return []
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         rows = conn.execute(
             "SELECT * FROM initiatives WHERE status != 'completed' ORDER BY updated_at DESC"
         ).fetchall()
@@ -609,10 +629,11 @@ def get_recent_initiatives(
 ) -> list[Initiative]:
     """Most recently kicked-off initiatives, newest first.
 
-    Resolves `db_path` lazily (mirrors `get_recent_decisions`/`get_recent_advice`)
-    so callers and tests pick up a monkeypatched/live `DB_PATH`, unlike
-    `list_initiatives`'s eager default. Ordered by `created_at` DESC — the
-    activity rail surfaces these as "kicked off initiative" events.
+    Resolves `db_path` lazily (mirrors `get_recent_decisions`/`get_recent_advice`,
+    and, since issue #5 Phase 1, every other function in this module) so
+    callers and tests pick up a monkeypatched/live `DB_PATH`. Ordered by
+    `created_at` DESC — the activity rail surfaces these as "kicked off
+    initiative" events.
     """
     resolved = _resolve_db_path(db_path)
     if not resolved.exists():
@@ -624,60 +645,66 @@ def get_recent_initiatives(
     return [Initiative(**dict(row)) for row in rows]
 
 
-def list_decisions(db_path: Path = DB_PATH) -> list[Decision]:
-    if not db_path.exists():
+def list_decisions(db_path: Path | None = None) -> list[Decision]:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return []
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         rows = conn.execute(
             "SELECT * FROM decisions ORDER BY timestamp DESC"
         ).fetchall()
     return [Decision(**dict(row)) for row in rows]
 
 
-def list_initiatives(db_path: Path = DB_PATH) -> list[Initiative]:
-    if not db_path.exists():
+def list_initiatives(db_path: Path | None = None) -> list[Initiative]:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return []
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         rows = conn.execute(
             "SELECT * FROM initiatives ORDER BY updated_at DESC"
         ).fetchall()
     return [Initiative(**dict(row)) for row in rows]
 
 
-def list_advice(db_path: Path = DB_PATH) -> list[Advice]:
-    if not db_path.exists():
+def list_advice(db_path: Path | None = None) -> list[Advice]:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return []
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         rows = conn.execute(
             "SELECT * FROM advice_given ORDER BY timestamp DESC"
         ).fetchall()
     return [Advice(**dict(row)) for row in rows]
 
 
-def get_decision(decision_id: int, db_path: Path = DB_PATH) -> Decision | None:
-    if not db_path.exists():
+def get_decision(decision_id: int, db_path: Path | None = None) -> Decision | None:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return None
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         row = conn.execute(
             "SELECT * FROM decisions WHERE id = ?", (decision_id,)
         ).fetchone()
     return Decision(**dict(row)) if row else None
 
 
-def get_initiative(initiative_id: int, db_path: Path = DB_PATH) -> Initiative | None:
-    if not db_path.exists():
+def get_initiative(initiative_id: int, db_path: Path | None = None) -> Initiative | None:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return None
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         row = conn.execute(
             "SELECT * FROM initiatives WHERE id = ?", (initiative_id,)
         ).fetchone()
     return Initiative(**dict(row)) if row else None
 
 
-def get_advice(advice_id: int, db_path: Path = DB_PATH) -> Advice | None:
-    if not db_path.exists():
+def get_advice(advice_id: int, db_path: Path | None = None) -> Advice | None:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return None
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         row = conn.execute(
             "SELECT * FROM advice_given WHERE id = ?", (advice_id,)
         ).fetchone()
@@ -692,7 +719,7 @@ def update_decision(
     rationale: str | None = None,
     outcome: str | None = None,
     tags: str | None = None,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> bool:
     fields: list[tuple[str, str]] = []
     if domain is not None:
@@ -722,7 +749,7 @@ def update_initiative(
     title: str | None = None,
     status: str | None = None,
     summary: str | None = None,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> bool:
     fields: list[tuple[str, str]] = []
     if title is not None:
@@ -749,7 +776,7 @@ def update_advice(
     domain: str | None = None,
     query_summary: str | None = None,
     advice_summary: str | None = None,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
 ) -> bool:
     fields: list[tuple[str, str]] = []
     if domain is not None:
@@ -769,26 +796,29 @@ def update_advice(
         return cursor.rowcount > 0
 
 
-def delete_decision(decision_id: int, db_path: Path = DB_PATH) -> bool:
-    if not db_path.exists():
+def delete_decision(decision_id: int, db_path: Path | None = None) -> bool:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return False
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         cursor = conn.execute("DELETE FROM decisions WHERE id = ?", (decision_id,))
         return cursor.rowcount > 0
 
 
-def delete_initiative(initiative_id: int, db_path: Path = DB_PATH) -> bool:
-    if not db_path.exists():
+def delete_initiative(initiative_id: int, db_path: Path | None = None) -> bool:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return False
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         cursor = conn.execute("DELETE FROM initiatives WHERE id = ?", (initiative_id,))
         return cursor.rowcount > 0
 
 
-def delete_advice(advice_id: int, db_path: Path = DB_PATH) -> bool:
-    if not db_path.exists():
+def delete_advice(advice_id: int, db_path: Path | None = None) -> bool:
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
         return False
-    with _get_conn(db_path) as conn:
+    with _get_conn(resolved) as conn:
         cursor = conn.execute("DELETE FROM advice_given WHERE id = ?", (advice_id,))
         return cursor.rowcount > 0
 
@@ -813,13 +843,14 @@ _MAX_OUTBOUND_CONTEXT_CHARS = 2000
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:
-    """Return the caller's path or the current module-level DB_PATH.
+    """Return the caller's path or the current episodic DB path.
 
-    Reading DB_PATH dynamically (not via default-arg binding) lets tests
-    monkeypatch `openexecutive.memory.episodic.DB_PATH` and have it actually
-    take effect — default arguments capture the value at def time.
+    Reading it dynamically via `get_episodic_db_path()` (not via default-arg
+    binding) lets tests monkeypatch `openexecutive.memory.episodic.DB_PATH`
+    and have it actually take effect — default arguments capture the value
+    at def time.
     """
-    return db_path if db_path is not None else DB_PATH
+    return db_path if db_path is not None else get_episodic_db_path()
 
 
 _VALID_INSERT_STATUSES = {"pending", "done"}
@@ -1429,7 +1460,7 @@ def last_contact_at_by_person(
 
 
 def format_for_prompt(
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
     max_chars: int = 2500,
     session_id: str = "",
 ) -> str:
@@ -1748,7 +1779,7 @@ MIN_TURN_CHARS_FOR_EXTRACTION = 1500
 async def extract_and_store(
     user_message: str,
     assistant_response: str,
-    db_path: Path = DB_PATH,
+    db_path: Path | None = None,
     session_id: str = "",
 ) -> None:
     """Extract memorable items from a conversation turn and persist them.

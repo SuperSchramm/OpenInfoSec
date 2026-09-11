@@ -1,5 +1,6 @@
 """Unit tests for episodic memory CRUD helpers."""
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -822,3 +823,94 @@ def test_extract_and_store_drops_initiative_with_hallucinated_quote(
     assert ep.list_initiatives(db_path=db) == [], (
         "initiative with hallucinated user_commitment_quote must be dropped"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #5 — bare calls must follow a monkeypatched DB_PATH, not a value
+# frozen at import time. These tests exercise the *bare-call-after-
+# monkeypatch* path specifically; every test above already passes an
+# explicit db_path=, which was never broken by the bug this guards against.
+# --------------------------------------------------------------------------- #
+
+def test_initialize_db_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for issue #5: initialize_db()'s default must be
+    resolved at call time, not frozen at def time, or a test-isolation
+    monkeypatch of episodic.DB_PATH silently fails to reach it (the prior
+    reverted fix's exact failure mode — schema gets created at the old,
+    real default path instead of the monkeypatched one).
+    """
+    from openexecutive.memory import episodic as ep
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(ep, "DB_PATH", patched_path)
+
+    ep.initialize_db()  # bare call, no explicit db_path
+
+    assert patched_path.exists(), (
+        "initialize_db() must create its schema at the current "
+        "episodic.DB_PATH, not a value frozen at import time"
+    )
+    with closing(sqlite3.connect(str(patched_path))) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "decisions" in tables and "scheduled_actions" in tables
+
+
+def test_list_decisions_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One of the 10 "explicit .exists()-guard" eager sites converted in
+    issue #5 Phase 1: a bare call must read from the current monkeypatched
+    path, not a value frozen at import time.
+
+    Seeds the row via a raw connection to `patched_path` directly (NOT via
+    `initialize_db`/`store_decision`, which are also being fixed in this
+    same phase) so this test isolates `list_decisions`'s own resolution
+    behavior rather than accidentally passing pre-fix because every eager
+    function shares the same frozen default and stays internally
+    consistent with itself.
+    """
+    from openexecutive.memory import episodic as ep
+
+    patched_path = tmp_path / "patched.db"
+    with closing(sqlite3.connect(str(patched_path))) as conn:
+        conn.execute(
+            "CREATE TABLE decisions ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " timestamp TEXT NOT NULL, domain TEXT NOT NULL, summary TEXT NOT NULL,"
+            " rationale TEXT DEFAULT '', outcome TEXT DEFAULT '', tags TEXT DEFAULT ''"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO decisions (timestamp, domain, summary) "
+            "VALUES ('2026-01-01T00:00:00', 'strategy', 'Expand to EU')"
+        )
+        conn.commit()
+
+    monkeypatch.setattr(ep, "DB_PATH", patched_path)
+
+    assert [d.summary for d in ep.list_decisions()] == ["Expand to EU"]
+
+
+def test_store_decision_bare_call_follows_monkeypatched_db_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One of the 9 "signature-only forwarding" eager sites converted in
+    issue #5 Phase 1: a bare call must write to the monkeypatched path
+    rather than an eager default frozen at import time.
+    """
+    from openexecutive.memory import episodic as ep
+
+    patched_path = tmp_path / "patched.db"
+    monkeypatch.setattr(ep, "DB_PATH", patched_path)
+    ep.initialize_db()
+
+    ep.store_decision("finance", "Raise a bridge round")  # bare call
+
+    with closing(sqlite3.connect(str(patched_path))) as conn:
+        rows = conn.execute("SELECT summary FROM decisions").fetchall()
+    assert rows == [("Raise a bridge round",)]

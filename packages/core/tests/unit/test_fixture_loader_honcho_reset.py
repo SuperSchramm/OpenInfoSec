@@ -42,17 +42,40 @@ def _isolate_dbs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     Also initialize each DB's schema, otherwise ``reset_all_state``'s seed
     step hits ``no such table: departments`` against the empty tmp files.
+
+    ``reset_all_state``'s wipe (``_delete_all_rows`` in ``fixture_loader.py``)
+    also DELETEs from ``alerts``/``mute_topics``/``user_preferences``/
+    ``workflow_runs``/``audit_log``/``eval_runs`` against this same episodic
+    path -- those tables coexist in the one physical episodic DB file by
+    convention (issue #5), the same way production boot initializes all of
+    them there before reset can ever run. Before episodic.py's issue #5
+    Phase 1 fix, ``episodic.initialize_db()`` below silently wrote to the
+    real default DB instead of ``episodic_path`` (never reaching the patched
+    path), so this tmp file never existed and `_delete_all_rows`'s
+    `if not db_path.exists()` guard made the wipe a silent no-op -- masking
+    the fact that these tables were never seeded here. Now that
+    `episodic.initialize_db()` correctly targets `episodic_path`, the file
+    exists and the wipe actually runs, so these tables must exist for real.
     """
+    from openexecutive.alerts import store as alerts_store
+    from openexecutive.audit.logger import AuditLogger
     from openexecutive.departments import store as dept_store
+    from openexecutive.evals.persistence import initialize_eval_runs_db
     from openexecutive.memory import episodic
     from openexecutive.people import store as people_store
+    from openexecutive.workflows.persistence import initialize_runs_db
 
-    monkeypatch.setattr(episodic, "DB_PATH", tmp_path / "episodic.db")
+    episodic_path = tmp_path / "episodic.db"
+    monkeypatch.setattr(episodic, "DB_PATH", episodic_path)
     monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
     monkeypatch.setattr(dept_store, "DB_PATH", tmp_path / "depts.db")
     episodic.initialize_db()
     people_store.initialize_db()
     dept_store.initialize_db()
+    alerts_store.initialize_db(episodic_path)
+    AuditLogger(db_path=episodic_path)
+    initialize_eval_runs_db(db_path=episodic_path)
+    initialize_runs_db(episodic_path)
 
 
 def test_reset_calls_honcho_workspace_delete(

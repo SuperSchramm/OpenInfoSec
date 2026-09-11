@@ -40,16 +40,30 @@ def settings_stub(tmp_path: Path) -> Any:
 
 @pytest.fixture(autouse=True)
 def _isolate_dbs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """See the identical fixture in test_fixture_loader_honcho_reset.py for
+    why alerts/audit/eval/workflow-run schemas must also be seeded here
+    (issue #5 Phase 1 unmasked this: `reset_all_state`'s wipe now actually
+    reaches this tmp file instead of silently no-oping on a file that was
+    never created)."""
+    from openexecutive.alerts import store as alerts_store
+    from openexecutive.audit.logger import AuditLogger
     from openexecutive.departments import store as dept_store
+    from openexecutive.evals.persistence import initialize_eval_runs_db
     from openexecutive.memory import episodic
     from openexecutive.people import store as people_store
+    from openexecutive.workflows.persistence import initialize_runs_db
 
-    monkeypatch.setattr(episodic, "DB_PATH", tmp_path / "episodic.db")
+    episodic_path = tmp_path / "episodic.db"
+    monkeypatch.setattr(episodic, "DB_PATH", episodic_path)
     monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
     monkeypatch.setattr(dept_store, "DB_PATH", tmp_path / "depts.db")
     episodic.initialize_db()
     people_store.initialize_db()
     dept_store.initialize_db()
+    alerts_store.initialize_db(episodic_path)
+    AuditLogger(db_path=episodic_path)
+    initialize_eval_runs_db(db_path=episodic_path)
+    initialize_runs_db(episodic_path)
     # Point the Honcho state file at the test's company profile dir.
     monkeypatch.setenv("COMPANY_PROFILE_PATH", str(tmp_path / "company" / "profile.yaml"))
     monkeypatch.setenv("HONCHO_WORKSPACE_ID", "openexec-test")
