@@ -26,6 +26,7 @@ test:
 
 lint:
 	cd packages/core && uv run ruff check openexecutive/ && uv run mypy openexecutive/
+	cd packages/core && uv run python scripts/validate_facts_yaml.py
 
 eval:
 	cd packages/core && uv run python ../../evals/run_evals.py \

@@ -76,6 +76,14 @@ Each `prebuilt/<id>.json` carries `section_id`, `title`, `markdown`, `mermaid`
 `python -m json.tool`. Pure additions to `SPECIALIST_REGISTRY` are
 auto-reflected in the `agents` facts and need no YAML edit.
 
+`architecture-facts.yaml` is almost all hand-authored prose, and an unquoted
+scalar value containing `: ` (colon-space) reads as a nested mapping key to
+YAML and fails to parse (issue #6) — quote such values or put them in a block
+literal (`key: |`). `make lint` and CI now run
+`python scripts/validate_facts_yaml.py` to catch this before it reaches the
+full test suite; run it directly after editing the file if you want faster
+feedback: `cd packages/core && uv run python scripts/validate_facts_yaml.py`.
+
 ## Prompt Changes
 
 Prompt changes to `executive_persona.py` or `domain_prompts.py` require:

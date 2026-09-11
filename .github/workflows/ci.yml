@@ -33,6 +33,9 @@ jobs:
       - name: Run mypy
         run: cd packages/core && uv run mypy openexecutive/ --ignore-missing-imports
 
+      - name: Validate architecture-facts.yaml parses
+        run: cd packages/core && uv run python scripts/validate_facts_yaml.py
+
   python-test:
     name: Python tests
     runs-on: ubuntu-latest
