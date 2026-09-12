@@ -17,9 +17,16 @@ dev:
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; cd packages/core && uv run uvicorn openexecutive.api.main:app --reload --port 8000 &
 	@if [ -f .env ]; then set -a; . ./.env; set +a; fi; cd packages/ui && npm run dev
 
+# See scripts/stop-dev.sh for why this is a script, not an inline recipe
+# (issue #7): a pkill pattern embedded directly in a Makefile recipe line
+# matches that line's own invoking shell (`make` runs each line via
+# `sh -c "<literal recipe text>"`) and kills it before later lines run.
+# MAKEFILE_LIST-derived path (not a bare relative one): `make` doesn't cd
+# to this file's directory, so `make -f /path/to/Makefile stop` run from
+# elsewhere must not fall back to executing whatever ./scripts/stop-dev.sh
+# happens to resolve to in the caller's cwd.
 stop:
-	@lsof -ti :8000 -ti :3000 2>/dev/null | xargs kill -9 2>/dev/null || true
-	@echo "Stopped."
+	@bash "$(dir $(lastword $(MAKEFILE_LIST)))scripts/stop-dev.sh"
 
 test:
 	cd packages/core && uv run pytest tests/ -v --tb=short

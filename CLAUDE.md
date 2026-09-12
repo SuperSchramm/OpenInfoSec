@@ -19,6 +19,7 @@ docker/                 Dockerfile + docker-compose.yml
 
 ```bash
 make dev          # Start FastAPI (port 8000) + Next.js (port 3000)
+make stop         # Kill both dev servers, including reload/worker children (issue #7)
 make test         # Run pytest
 make lint         # ruff check + mypy
 make eval         # Run eval suite against localhost
