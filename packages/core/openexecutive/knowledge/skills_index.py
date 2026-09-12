@@ -72,11 +72,16 @@ def search_skills(
     store: ChromaDBStore,
     n_results: int = 5,
     source_filter: SkillSource | None = None,
+    category_filter: str | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic search across the skill index.
 
     Returns a list of `{name, category, description, when_to_use, source, score}`
     — no body. The Executive must call `load_skill` to fetch the procedure.
+    `category_filter` scopes the search to one `SKILL_CATEGORIES` value (e.g.
+    a specialist's own domain) — used by `retriever.retrieve_skills()` so a
+    specialist consult never surfaces a skill filed under someone else's
+    category.
     """
     if n_results <= 0:
         return []
@@ -86,7 +91,18 @@ def search_skills(
     if count == 0:
         return []
 
-    where: dict[str, Any] | None = {"source": source_filter} if source_filter else None
+    conditions: list[dict[str, Any]] = []
+    if source_filter:
+        conditions.append({"source": source_filter})
+    if category_filter:
+        conditions.append({"category": category_filter})
+    where: dict[str, Any] | None
+    if not conditions:
+        where = None
+    elif len(conditions) == 1:
+        where = conditions[0]
+    else:
+        where = {"$and": conditions}
     query_kwargs: dict[str, Any] = {
         "query_texts": [query],
         "n_results": min(n_results, count),
@@ -104,7 +120,13 @@ def search_skills(
             strict=False,
         ):
             # Cosine distance -> similarity score for human readability.
-            score = max(0.0, 1.0 - float(dist))
+            # "score" is clamped/rounded for display; "distance" is the raw
+            # value, kept separately so a caller applying a relevance
+            # threshold (retriever.retrieve_skills) compares against the
+            # real distance rather than reconstructing (and losing
+            # precision/clamping) from the rounded score.
+            distance = float(dist)
+            score = max(0.0, 1.0 - distance)
             hits.append({
                 "name": meta.get("name", ""),
                 "category": meta.get("category", ""),
@@ -112,6 +134,7 @@ def search_skills(
                 "when_to_use": meta.get("when_to_use", ""),
                 "source": meta.get("source", ""),
                 "score": round(score, 4),
+                "distance": distance,
             })
     return hits
 
@@ -142,6 +165,48 @@ async def seed_builtin_skills(store: ChromaDBStore | None = None, force: bool = 
         index_skill(skill, store)
         count += 1
     return count
+
+
+def skills_active_for(specialist_name: str, store: ChromaDBStore) -> bool:
+    """True iff this specialist's domain has any populated skill content.
+
+    The single shared gate for the specialist-consult skills path — call
+    this everywhere that decision needs to be made rather than re-deriving
+    it. Keys off `BaseAgent.domain` (the class attribute), NOT
+    `retriever.DOMAIN_ALIASES` — those two mappings disagree for several
+    specialists (issue #12): `grc`'s alias list is `["governance",
+    "compliance"]` and never contains `"security"`, even though
+    `GRCAgent.domain == "security"` and that's where its skill content
+    actually lives. Using `DOMAIN_ALIASES` here would silently exclude it.
+
+    No caching (benchmarked: an unfiltered full-collection fetch ran
+    p50=1.24ms/p95=1.58ms over ~25 docs — negligible next to a
+    multi-second specialist LLM call). Uses a `where`-filtered,
+    `limit=1` existence check (mirrors `count_skills`'s pattern below)
+    rather than materializing every skill's metadata just to compute
+    membership — cost still scales with total *categories* queried
+    (one call per specialist per turn), not with total skill count.
+
+    Fails closed, never raises: unknown specialist, a registry entry with
+    no `domain` attribute (some test doubles), or a lookup error against
+    the collection all return `False` rather than propagating — this gate
+    must not be able to break a specialist consult, or (since
+    `_retrieve_for_call` also calls it) plain `retrieve()` either.
+    """
+    from openexecutive.orchestrator.router import SPECIALIST_REGISTRY
+
+    agent = SPECIALIST_REGISTRY.get(specialist_name)
+    domain = getattr(agent, "domain", None)
+    if domain is None:
+        return False
+
+    try:
+        col = store._get_or_create_collection(SKILLS_COLLECTION)
+        result = col.get(where={"category": domain}, limit=1, include=[])
+        return len(result.get("ids", [])) > 0
+    except Exception:
+        logger.exception("skills_active_for: lookup failed for domain %r", domain)
+        return False
 
 
 def count_skills(store: ChromaDBStore, source: SkillSource | None = None) -> int:

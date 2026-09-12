@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from openexecutive.agents.base import BaseAgent
 
 if TYPE_CHECKING:
+    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.orchestrator.debug_events import DebugCollector
 from openexecutive.agents.board_comms import BoardCommsAgent
 from openexecutive.agents.ciso import CISOAgent
@@ -287,6 +288,7 @@ async def route_to_specialist(
     episodic_context: str = "",
     failure_cases: str = "",
     department_memory: str = "",
+    skill_context: str = "",
 ) -> str:
     if specialist_name not in CHAT_CONSULTABLE_SPECIALISTS:
         if specialist_name in SPECIALIST_REGISTRY:
@@ -320,6 +322,7 @@ async def route_to_specialist(
         episodic_context=episodic_context,
         failure_cases=failure_cases,
         department_memory=department_memory,
+        skill_context=skill_context,
     )
 
 
@@ -371,21 +374,73 @@ def partition_specialist_fanout(
     return run_tool_uses, run_calls, skipped_results, cap
 
 
-async def _retrieve_for_call(call: dict[str, str]) -> str:
-    """Run a per-specialist, domain-filtered vector retrieval for one tool call."""
-    from openexecutive.knowledge.retriever import retrieve
+async def _retrieve_for_call(call: dict[str, str], store: ChromaDBStore) -> str:
+    """Run a per-specialist, domain-filtered vector retrieval for one tool call.
 
-    return await asyncio.to_thread(
-        retrieve, query=call["query"], specialist_name=call["specialist"]
-    )
+    Drops n_builtin from the settings default (5) to 4 when this specialist's
+    domain is skills-active (skills_index.skills_active_for, which fails
+    closed on any error -- a skills-collection problem can't break this
+    call) -- keeps the combined per-consult context budget close to
+    today's levels once _retrieve_skills_for_call's single extra chunk is
+    added, rather than additive on top of it. Uses the SAME shared gate
+    retrieve_skills() itself uses; do not duplicate this boolean logic
+    elsewhere.
+
+    Takes a pre-built ``store`` shared across the whole batch -- see
+    route_parallel for why (chromadb PersistentClient construction is not
+    thread-safe against a shared path; queries against an already-built
+    client are).
+    """
+
+    def _run() -> str:
+        from openexecutive.config import get_settings
+        from openexecutive.knowledge.retriever import retrieve
+        from openexecutive.knowledge.skills_index import skills_active_for
+
+        n_builtin = (
+            # max(1, ...): KNOWLEDGE_BUILTIN_N_RESULTS=1 must not silently
+            # become 0 for skills-active specialists -- 0 has a distinct,
+            # deliberate meaning elsewhere (the RAG ablation harness's "disable
+            # builtin RAG entirely" lever, checked in retrieve()); this
+            # reduction must never produce that value as a side effect.
+            max(1, get_settings().knowledge_builtin_n_results - 1)
+            if skills_active_for(call["specialist"], store)
+            else None
+        )
+        return retrieve(
+            query=call["query"],
+            specialist_name=call["specialist"],
+            n_builtin=n_builtin,
+            store=store,
+        )
+
+    return await asyncio.to_thread(_run)
 
 
-async def _retrieve_failures_for_call(call: dict[str, str]) -> str:
+async def _retrieve_failures_for_call(call: dict[str, str], store: ChromaDBStore) -> str:
     """Domain-filtered failure case retrieval for one specialist call."""
     from openexecutive.knowledge.retriever import retrieve_failures
 
     return await asyncio.to_thread(
-        retrieve_failures, query=call["query"], specialist_name=call["specialist"]
+        retrieve_failures,
+        query=call["query"],
+        specialist_name=call["specialist"],
+        store=store,
+    )
+
+
+async def _retrieve_skills_for_call(call: dict[str, str], store: ChromaDBStore) -> str:
+    """Domain-gated skills-library retrieval for one specialist call.
+
+    See skills_index.skills_active_for for the gate this short-circuits on.
+    """
+    from openexecutive.knowledge.retriever import retrieve_skills
+
+    return await asyncio.to_thread(
+        retrieve_skills,
+        query=call["query"],
+        specialist_name=call["specialist"],
+        store=store,
     )
 
 
@@ -442,17 +497,46 @@ async def route_parallel(
     with tool_use_ids.
     """
     if retrieved_knowledge_map is None:
-        knowledge_futures = [_retrieve_for_call(c) for c in calls]
-        failures_futures = [_retrieve_failures_for_call(c) for c in calls]
-        all_results = await asyncio.gather(*knowledge_futures, *failures_futures)
-        mid = len(calls)
-        knowledge_per_call = list(all_results[:mid])
-        failures_per_call = list(all_results[mid:])
+        # One store, built once, shared across every specialist and every
+        # retrieval path in this batch. chromadb's PersistentClient is NOT
+        # safe to construct concurrently against the same on-disk path from
+        # multiple threads (reproduced independently of this feature --
+        # constructing 4 stores concurrently via asyncio.gather+to_thread
+        # crashes with 'RustBindingsAPI' object has no attribute 'bindings',
+        # using only pre-existing ChromaDBStore code, unrelated to anything
+        # below). Concurrent *queries* against one already-built shared
+        # store are fine -- verified directly before landing this fix.
+        # This closes the race this batch's own fan-out would otherwise
+        # introduce; it does NOT close the same race against other
+        # subsystems that build their own independent stores from
+        # background tasks (scheduler, skills_tools, notion_sync,
+        # documents) -- tracked separately in issue #13.
+        #
+        # Built via to_thread, not inline: PersistentClient construction
+        # opens SQLite and initializes the embedding backend, which would
+        # otherwise block the whole event loop (every in-flight SSE stream)
+        # for its duration.
+        from openexecutive.config import get_settings
+        from openexecutive.knowledge.store import ChromaDBStore as _ChromaDBStore
+
+        def _build_store() -> _ChromaDBStore:
+            return _ChromaDBStore(persist_directory=get_settings().vector_store_path)
+
+        shared_store = await asyncio.to_thread(_build_store)
+        knowledge_futures = [_retrieve_for_call(c, shared_store) for c in calls]
+        failures_futures = [_retrieve_failures_for_call(c, shared_store) for c in calls]
+        skills_futures = [_retrieve_skills_for_call(c, shared_store) for c in calls]
+        all_results = await asyncio.gather(*knowledge_futures, *failures_futures, *skills_futures)
+        n = len(calls)
+        knowledge_per_call = list(all_results[:n])
+        failures_per_call = list(all_results[n : 2 * n])
+        skills_per_call = list(all_results[2 * n :])
     else:
         knowledge_per_call = [
             retrieved_knowledge_map.get(c["specialist"], "") for c in calls
         ]
         failures_per_call = [""] * len(calls)
+        skills_per_call = [""] * len(calls)
 
     # Fan out dept-memory prefetch alongside knowledge/failures. Each call
     # is cheap when Honcho is disabled or when the specialist has no
@@ -472,6 +556,7 @@ async def route_parallel(
                 "query": call["query"],
                 "retrieved_chars": len(knowledge_per_call[idx]),
                 "failures_chars": len(failures_per_call[idx]),
+                "skills_chars": len(skills_per_call[idx]),
                 "department_memory_chars": len(dept_memory_per_call[idx]),
             })
         t_start = time.monotonic()
@@ -483,6 +568,7 @@ async def route_parallel(
             episodic_context=episodic_context,
             failure_cases=failures_per_call[idx],
             department_memory=dept_memory_per_call[idx],
+            skill_context=skills_per_call[idx],
         )
         if debug_collector:
             debug_collector.emit("specialist_done", {

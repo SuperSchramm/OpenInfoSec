@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -12,6 +13,8 @@ from openexecutive.knowledge.review_store import (
     ReviewStore,
 )
 from openexecutive.knowledge.store import ChromaDBStore
+
+logger = logging.getLogger(__name__)
 
 # Cosine distance threshold for the main retrieve() path. Hits with a
 # distance > this are dropped before the top-K slice. Mirrors the value
@@ -416,3 +419,163 @@ def retrieve_failures(
         filename = r["metadata"].get("filename", "unknown")
         parts.append(f"[{filename}] {r['text']}")
     return "\n\n".join(parts)
+
+
+def retrieve_skills(
+    query: str,
+    specialist_name: str | None = None,
+    n_results: int = 1,
+    store: ChromaDBStore | None = None,
+    distance_threshold: float | None = None,
+) -> str:
+    """Domain-gated, single-best-match skills-library lookup for one specialist call.
+
+    Returns "" with zero ChromaDB queries when the specialist's domain has no
+    populated skill content (see `skills_index.skills_active_for` — the one
+    shared gate; do not re-derive this check here or anywhere else) or when
+    `query` is too short to benefit from semantic search (same
+    `_MIN_QUERY_CHARS` bypass `retrieve()` applies).
+
+    Skills are indexed shallow (name+description+when_to_use only, see
+    `skills_index._skill_doc_text`), so a hit clearing the relevance
+    threshold triggers a second step, `skills_repo.get_skill()`, to load
+    the full body before injection -- mirrors the Executive's own
+    `search_skills` -> `load_skill` pair, collapsed into one deterministic
+    call. `n_results=1`: a whole skill body runs ~1.5-2x a single BUILTIN
+    chunk's size, so capping at one keeps the combined per-consult context
+    budget close to today's levels (see `_retrieve_for_call`'s matching
+    `n_builtin` reduction).
+
+    This is an optional enrichment, not core retrieval: any exception from
+    the gate or the search itself is treated as "nothing found," never
+    propagated -- a skills-collection problem must not be able to break a
+    specialist consult, and (via the shared `skills_active_for` gate) must
+    not be able to break plain `retrieve()` either.
+
+    `source == "company"` skill bodies are user-created and get the same
+    treatment `retrieve()` already applies to synced Notion wiki text:
+    `_format_untrusted_wiki()` (ATX headers stripped AND every line
+    prefixed, not just headers stripped) plus an explicit unverified
+    label. The per-line prefix matters as much as the heading strip here —
+    without it a hit body can still forge a closing `</relevant_skill>`
+    followed by a fake `<relevant_knowledge>` block carrying a
+    `[verified - priority source]` citation tag, escaping its own
+    container and outranking the label meant to demote it. A company
+    skill can be created by a prompt-injected Executive acting on
+    attacker-controlled content (Notion, recent_research) and later
+    replayed verbatim into a *different* specialist's trusted context.
+    `builtin` skills are shipped with the repo and read-only at runtime,
+    so they stay at the same trust tier as curated BUILTIN knowledge.
+    """
+    from openexecutive.config import get_settings
+    from openexecutive.knowledge import skills_repo
+    from openexecutive.knowledge.skills_index import search_skills, skills_active_for
+
+    if specialist_name is None:
+        return ""
+
+    # Resolved once, up front: cheap dict lookup (no exception risk), and
+    # every _emit() call below -- including the early short-query/gate-closed
+    # bypasses -- needs it for domain_filter. `agent` may legitimately be
+    # None for an unknown specialist_name; skills_active_for handles that
+    # (returns False) rather than this function re-deriving the check.
+    from openexecutive.orchestrator.router import SPECIALIST_REGISTRY
+
+    agent = SPECIALIST_REGISTRY.get(specialist_name)
+    settings = get_settings()
+
+    def _emit(result_row: dict[str, Any] | None) -> None:
+        _emit_retrieval_audit(
+            query=query,
+            domain_filter=[agent.domain] if agent is not None else None,
+            specialist_name=specialist_name,
+            builtin_results=[result_row] if result_row else [],
+            company_results=[],
+            annotation_count=0,
+            collection="skills",
+        )
+
+    if len(query.strip()) < _MIN_QUERY_CHARS:
+        _emit(None)
+        return ""
+
+    if store is None:
+        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+
+    try:
+        active = skills_active_for(specialist_name, store)
+    except Exception:  # noqa: BLE001 - optional enrichment must never break a consult
+        logger.exception("retrieve_skills: skills_active_for failed for %r", specialist_name)
+        active = False
+    if not active or agent is None:
+        _emit(None)
+        return ""
+
+    threshold = (
+        distance_threshold if distance_threshold is not None else settings.knowledge_distance_threshold
+    )
+
+    try:
+        hits = search_skills(query, store, n_results=n_results, category_filter=agent.domain)
+    except Exception:  # noqa: BLE001 - optional enrichment must never break a consult
+        logger.exception("retrieve_skills: search_skills failed for specialist %r", specialist_name)
+        hits = []
+
+    if not hits:
+        _emit(None)
+        return ""
+
+    best = hits[0]
+    distance = best["distance"]
+    if distance > threshold:
+        _emit(None)
+        return ""
+
+    try:
+        skill = skills_repo.get_skill(best["name"])
+    except Exception as exc:  # noqa: BLE001 - never let a malformed/missing skill break a consult
+        # Log the real exception (may embed an absolute server path, e.g.
+        # SkillParseError) server-side only -- the audit row (readable via
+        # the /audit/logs/{id} API) gets just the exception class and skill
+        # name, distinguishable from "no hits"/"below threshold" (both
+        # emit None, i.e. an empty chunk list) without leaking path detail.
+        logger.warning("retrieve_skills: failed to load matched skill %r: %s", best["name"], exc)
+        _emit({
+            "metadata": {"filename": best["name"], "domain": agent.domain},
+            "distance": distance,
+            "text": f"[skill matched but failed to load: {type(exc).__name__}]",
+        })
+        return ""
+
+    fm = skill.frontmatter
+    if skill.source == "company":
+        # User-created content, same trust tier and treatment as synced
+        # Notion wiki text -- see docstring.
+        safe_description = _format_untrusted_wiki(fm.description)
+        safe_when_to_use = _format_untrusted_wiki(fm.when_to_use)
+        safe_body = _format_untrusted_wiki(skill.body)
+        body_text = (
+            f"**Skill**: {fm.name}\n\n"
+            f"**Category**: {fm.category}  \n"
+            f"**Source**: company (user-created — unverified, weigh below builtin skills)\n\n"
+            f"**Description**: {safe_description}\n\n"
+            f"**When to use**: {safe_when_to_use}\n\n"
+            f"---\n\n{safe_body}"
+        )
+    else:
+        body_text = (
+            f"# {fm.name}\n\n"
+            f"**Category**: {fm.category}  \n"
+            f"**Source**: {skill.source}\n\n"
+            f"**Description**: {fm.description}\n\n"
+            f"**When to use**: {fm.when_to_use}\n\n"
+            f"---\n\n{skill.body}"
+        )
+
+    _emit({
+        "metadata": {"filename": fm.name, "domain": agent.domain},
+        "distance": distance,
+        "text": body_text,
+    })
+
+    return f"### Relevant skill:\n\n{body_text}"

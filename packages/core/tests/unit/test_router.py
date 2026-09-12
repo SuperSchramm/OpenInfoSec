@@ -41,6 +41,7 @@ def test_route_to_specialist_passes_episodic_to_analyze() -> None:
         episodic_context="EPISODIC",
         failure_cases="",
         department_memory="",
+        skill_context="",
     )
 
 

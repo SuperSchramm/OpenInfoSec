@@ -44,6 +44,7 @@ def stub_agents(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any
             episodic_context: str = "",
             failure_cases: str = "",
             department_memory: str = "",
+            skill_context: str = "",
         ) -> str:
             received.setdefault(self.name, []).append(
                 {
@@ -68,6 +69,10 @@ def _stub_retrievers(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         "openexecutive.knowledge.retriever.retrieve_failures",
+        lambda **_: "",
+    )
+    monkeypatch.setattr(
+        "openexecutive.knowledge.retriever.retrieve_skills",
         lambda **_: "",
     )
 

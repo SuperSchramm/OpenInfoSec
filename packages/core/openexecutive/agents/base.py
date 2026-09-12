@@ -51,6 +51,7 @@ class BaseAgent(ABC):
         episodic_context: str = "",
         failure_cases: str = "",
         department_memory: str = "",
+        skill_context: str = "",
         *,
         system_prompt_override: str | None = None,
         model_override: str | None = None,
@@ -84,6 +85,10 @@ class BaseAgent(ABC):
         if retrieved_knowledge:
             user_content = (
                 f"<relevant_knowledge>\n{retrieved_knowledge}\n</relevant_knowledge>\n\n{user_content}"
+            )
+        if skill_context:
+            user_content = (
+                f"<relevant_skill>\n{skill_context}\n</relevant_skill>\n\n{user_content}"
             )
         if failure_cases:
             user_content = (

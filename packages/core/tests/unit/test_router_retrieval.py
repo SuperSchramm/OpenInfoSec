@@ -27,6 +27,7 @@ def stub_agents(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any
             episodic_context: str = "",
             failure_cases: str = "",
             department_memory: str = "",
+            skill_context: str = "",
         ) -> str:
             received.setdefault(self.name, []).append(
                 {
@@ -36,6 +37,7 @@ def stub_agents(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any
                     "episodic": episodic_context,
                     "failures": failure_cases,
                     "department_memory": department_memory,
+                    "skills": skill_context,
                 }
             )
             return f"answer-from-{self.name}"
@@ -60,9 +62,14 @@ def test_route_parallel_auto_retrieves_per_specialist(
         "openexecutive.knowledge.retriever.retrieve", fake_retrieve
     )
     # route_parallel now also fans out a domain-filtered failure-case
-    # lookup; stub it so the test never reaches ChromaDB.
+    # lookup and a skills-library lookup; stub both so the test never
+    # reaches ChromaDB.
     monkeypatch.setattr(
         "openexecutive.knowledge.retriever.retrieve_failures",
+        lambda **_: "",
+    )
+    monkeypatch.setattr(
+        "openexecutive.knowledge.retriever.retrieve_skills",
         lambda **_: "",
     )
 
@@ -121,6 +128,10 @@ def test_route_parallel_preserves_call_order(
     )
     monkeypatch.setattr(
         "openexecutive.knowledge.retriever.retrieve_failures",
+        lambda **_: "",
+    )
+    monkeypatch.setattr(
+        "openexecutive.knowledge.retriever.retrieve_skills",
         lambda **_: "",
     )
 
