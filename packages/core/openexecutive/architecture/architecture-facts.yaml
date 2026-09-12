@@ -575,7 +575,47 @@ knowledge:
         retriever queries it with a small n and appends it under a clearly-
         labelled "Recent research (unverified, web-sourced …)" section ranked
         BELOW the curated company-documents section.
+    - name: SKILLS
+      what: |
+        Reusable procedure playbooks (openexecutive.knowledge.skills_index,
+        ChromaDB collection `skills`). One document per skill, no chunking —
+        the search corpus is `name` + `description` + `when_to_use`; the
+        body is fetched separately. Reachable two ways: (1) on demand,
+        Executive-only, via the `search_skills` -> `load_skill` tool pair
+        (executive_persona.py: "a request resembles work you've codified"),
+        the mechanism every pre-existing skill (finance/board/hr/etc.,
+        authored as user-triggered deliverable templates) was built for;
+        (2) automatically, per specialist, via
+        retriever.retrieve_skills() — added to route_parallel's per-call
+        fan-out alongside retrieve()/retrieve_failures() — gated by
+        skills_index.skills_active_for(), which checks whether that
+        specialist's BaseAgent.domain (NOT domain_aliases_source below) has
+        any populated skill content. The two gates diverge for several
+        specialists (grc's DOMAIN_ALIASES is ["governance","compliance"],
+        never "security", though GRCAgent.domain=="security" and that's
+        where its skill content lives — see issue #12) — retrieve_skills()
+        must key off agent.domain or grc silently loses its own content, as
+        it originally did before this was caught. Path 2 is live today only
+        for category=security (ciso/cyberops/grc); inert for every other
+        specialist until someone authors consult-style skill content in
+        their domain. A source=="company" hit's body/description/when_to_use
+        go through the same _format_untrusted_wiki treatment as NOTION_WIKI
+        text before injection (a company skill can be created by a
+        prompt-injected Executive and later replayed into a *different*
+        specialist's context); source=="builtin" skills stay at BUILTIN's
+        trust tier. When path 2 is active for a specialist, that
+        specialist's own n_builtin drops by one (floored at 1, never 0 —
+        0 is reserved for the RAG-ablation-harness "disable builtin
+        entirely" lever) to keep combined per-consult context budget
+        roughly flat rather than additive.
   domain_aliases_source: openexecutive.knowledge.retriever.DOMAIN_ALIASES
+  domain_aliases_caveat: |
+    DOMAIN_ALIASES (used by retrieve()/retrieve_failures()) and
+    BaseAgent.domain (the class attribute, used by skills_active_for() and
+    elsewhere) are two independently-maintained mappings that already
+    disagree for several specialists — confirmed for grc and talent (zero
+    overlap) and ciso/cpo/board_comms (partial overlap, one has an extra
+    alias domain the other lacks). Tracked in issue #12; not yet reconciled.
   dedupe_note: Multi-domain chunks can fan out to multiple rows; the retriever dedupes by text before returning.
 
 memory:
