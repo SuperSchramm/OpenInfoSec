@@ -85,6 +85,12 @@ def test_filename_mismatch_raises(tmp_path: Path) -> None:
         parse_skill_text(_good_text(name="different-name"), path, source="builtin")
 
 
+def test_security_category_parses(tmp_path: Path) -> None:
+    path = tmp_path / "test-skill.md"
+    skill = parse_skill_text(_good_text(category="security"), path, source="builtin")
+    assert skill.frontmatter.category == "security"
+
+
 def test_invalid_category_raises(tmp_path: Path) -> None:
     path = tmp_path / "test-skill.md"
     with pytest.raises(SkillParseError, match="unknown category"):
