@@ -1,7 +1,7 @@
 ---
 name: board-risk-reporting
-description: Translate technical security metrics and threat telemetry into board-legible business risk narrative
-when_to_use: The CISO specialist is asked to prepare or frame a board update, executive briefing, or any communication that needs to move from technical detail to business impact
+description: Translate technical security metrics and threat telemetry into board-legible business risk narrative, including quantifying exposure in financial terms with Single Loss Expectancy (SLE), Annualized Rate of Occurrence (ARO), and Annualized Loss Expectancy (ALE)
+when_to_use: The CISO specialist is asked to prepare or frame a board update, executive briefing, or any communication that needs to move from technical detail to business impact — including calculating or presenting SLE/ARO/ALE risk-quantification figures for the board
 category: security
 ---
 

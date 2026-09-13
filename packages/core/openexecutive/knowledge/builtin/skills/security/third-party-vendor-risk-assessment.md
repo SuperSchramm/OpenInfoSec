@@ -1,7 +1,7 @@
 ---
 name: third-party-vendor-risk-assessment
-description: Assess and quantify the security risk a vendor, contractor, or cloud partner introduces before or during a business relationship
-when_to_use: A new vendor is being onboarded, an existing vendor relationship is under review, or a vendor-related incident or finding needs to be scoped
+description: Assess and quantify the security risk a vendor, contractor, or cloud partner introduces before or during a business relationship — including what a SOC 2 report or ISO certification actually attests to versus what it leaves uncovered
+when_to_use: A new vendor is being onboarded, an existing vendor relationship is under review, a vendor-related incident or finding needs to be scoped, or someone asks what a SOC 2/ISO audit attestation covers or doesn't cover and what supplemental controls are needed beyond it
 category: security
 ---
 

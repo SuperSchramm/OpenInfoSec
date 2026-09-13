@@ -1,7 +1,7 @@
 ---
 name: compliance-gap-risk-assessment
-description: Distinguish a compliance gap from an operational risk, and determine whether closing the paperwork gap actually closes the underlying exposure
-when_to_use: An audit finding, control assessment, or framework mapping surfaces a gap and GRC needs to determine what it actually means and who needs to act on it
+description: Distinguish a compliance gap from an operational risk — classify a finding as a documentation gap, a testing gap, or a capability gap, and determine whether an undocumented process the team says it actually performs is a real risk or just a paperwork issue
+when_to_use: A process like access reviews isn't documented, but the team says they actually do it regularly and just never wrote it down — is that a real problem or just a paperwork issue? Also applies whenever an audit finding, control assessment, or framework mapping surfaces a gap and GRC needs to determine what it actually means and who needs to act on it.
 category: security
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: incident-containment-triage
-description: Triage and contain an active security incident — assess scope, choose a containment action, and avoid the most common containment mistakes
-when_to_use: An incident is confirmed or strongly suspected and CyberOps needs to decide what to isolate, disable, or disconnect right now
+description: Triage and contain an active security incident — assess scope, choose the least-disruptive containment action, avoid the most common containment mistakes, and decide whether it's safe to disconnect or isolate a system tied to a physical process, a hospital network, or a patient-connected medical device
+when_to_use: An incident is confirmed or strongly suspected and CyberOps needs to decide what to isolate, disable, or disconnect right now — including when the affected system is industrial control equipment, a hospital network, or a patient-connected medical device such as an infusion pump, where disconnecting is not automatically the safe default and fail-safe behavior and physical or patient safety must be checked first
 category: security
 ---
 

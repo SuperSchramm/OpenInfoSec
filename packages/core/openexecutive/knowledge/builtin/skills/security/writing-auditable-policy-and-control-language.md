@@ -1,7 +1,7 @@
 ---
 name: writing-auditable-policy-and-control-language
-description: Write policy and control language that's actually operable and auditable, not aspirational prose that maps to a framework in theory only
-when_to_use: A new policy needs to be drafted, an existing one needs revision, or a control needs to be documented in a way an auditor and the actual operator can both use
+description: Write policy and control language that's actually operable and auditable, not aspirational prose that maps to a framework in theory only — including naming a specific responsible role rather than a department, and stating review or testing cadence explicitly rather than "regularly"
+when_to_use: A new policy needs to be drafted, an existing one needs revision, or a control needs to be documented in a way an auditor and the actual operator can both use — including when an auditor flags language as too vague (e.g. "IT is responsible," "reviewed regularly") and it needs a specific role and explicit cadence instead
 category: security
 ---
 

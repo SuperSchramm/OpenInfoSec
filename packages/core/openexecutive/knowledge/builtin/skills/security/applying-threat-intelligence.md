@@ -1,7 +1,7 @@
 ---
 name: applying-threat-intelligence
-description: Use threat intelligence to make prioritization, investment, and risk-communication decisions defensible rather than generic
-when_to_use: CyberOps needs to justify a prioritization call, a likelihood rating, or a resourcing decision with something more specific than general concern
+description: Use threat intelligence to make prioritization, investment, and risk-communication decisions defensible rather than generic, including sourcing OT/ICS-specific intelligence (ICS-CERT advisories, sector ISACs) when standard enterprise feeds miss industrial-control-targeting activity
+when_to_use: CyberOps needs to justify a prioritization call, a likelihood rating, or a resourcing decision with something more specific than general concern — including when standard threat intel feeds don't seem to cover an OT/ICS or industrial environment and sector-specific sourcing is needed
 category: security
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: ciso-grc-interoperability
-description: Understand the reciprocal working relationship between the CISO and GRC functions — when to lean on GRC, and how GRC feeds CISO reporting
-when_to_use: The CISO specialist needs to determine whether a question is its own to answer, belongs with GRC, or requires input from GRC before answering
+description: Understand the reciprocal working relationship between the CISO and GRC functions — when to lean on GRC, how GRC feeds CISO reporting, and who owns a finding when GRC's compliance assessment and CyberOps's operational reality disagree
+when_to_use: The CISO specialist needs to determine whether a question is its own to answer, belongs with GRC, or requires input from GRC before answering — including when GRC says a control passed its audit but CyberOps says it doesn't actually work in production and someone needs to decide whose call that is
 category: security
 ---
 
