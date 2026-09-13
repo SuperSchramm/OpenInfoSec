@@ -512,30 +512,17 @@ async def route_parallel(
         if store is not None:
             shared_store = store
         else:
-            # Deliberately not a call to store_access.get_shared_store():
-            # that helper's own fallback constructs inline (fine for the
-            # tool handlers, which are dispatched outside the event loop's
-            # hot path), but this fallback specifically needs the
-            # to_thread wrap below since a live SSE stream may be
-            # in flight on this same loop.
-            from openexecutive.mcp_server.server import get_store as _get_shared_store
+            # store_access.get_shared_store() is the single implementation of
+            # "prefer the process-wide singleton, else construct" -- run it
+            # via to_thread rather than inline: it's a cheap dict lookup in
+            # the common case (singleton set), but in the rare case it isn't
+            # (e.g. tests calling route_parallel directly, or a
+            # lifespan-less process) it constructs a PersistentClient
+            # inline, which would otherwise block this loop's live SSE
+            # streams for the duration.
+            from openexecutive.orchestrator.store_access import get_shared_store
 
-            shared_store = _get_shared_store()
-            if shared_store is None:
-                # Built via to_thread, not inline: PersistentClient construction
-                # opens SQLite and initializes the embedding backend, which would
-                # otherwise block the whole event loop (every in-flight SSE
-                # stream) for its duration. Only reached when neither a
-                # caller-supplied store nor the process-wide singleton is
-                # available (e.g. tests calling route_parallel directly, or a
-                # lifespan-less process).
-                from openexecutive.config import get_settings
-                from openexecutive.knowledge.store import ChromaDBStore as _ChromaDBStore
-
-                def _build_store() -> _ChromaDBStore:
-                    return _ChromaDBStore(persist_directory=get_settings().vector_store_path)
-
-                shared_store = await asyncio.to_thread(_build_store)
+            shared_store = await asyncio.to_thread(get_shared_store)
         knowledge_futures = [_retrieve_for_call(c, shared_store) for c in calls]
         failures_futures = [_retrieve_failures_for_call(c, shared_store) for c in calls]
         skills_futures = [_retrieve_skills_for_call(c, shared_store) for c in calls]
