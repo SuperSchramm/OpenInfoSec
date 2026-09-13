@@ -310,7 +310,10 @@ async def _run_chat_turn(
 
     page_context_block = _build_page_context_block(page_context)
 
-    executive = Executive(mcp_gateway=getattr(request.app.state, "mcp_gateway", None))
+    executive = Executive(
+        mcp_gateway=getattr(request.app.state, "mcp_gateway", None),
+        store=getattr(request.app.state, "store", None),
+    )
     settings = get_settings()
     timeout_s = settings.chat_stream_timeout_s
 

@@ -474,6 +474,7 @@ async def route_parallel(
     episodic_context: str = "",
     session_id: str | None = None,
     debug_collector: DebugCollector | None = None,
+    store: ChromaDBStore | None = None,
 ) -> list[str]:
     """Execute multiple specialist calls concurrently.
 
@@ -493,36 +494,48 @@ async def route_parallel(
     representation; specialists without an owning department (e.g.
     ``triage``) skip the prefetch entirely.
 
+    ``store`` (when provided, e.g. the caller's ``app.state.store``) is
+    reused directly for every retrieval path in this batch instead of
+    constructing a fresh one -- see issue #13: chromadb's PersistentClient
+    is not safe to construct concurrently against the same on-disk path,
+    though concurrent queries against one already-built client are. This
+    supersedes the earlier per-batch ``_build_store()`` approach shipped in
+    2f9de07/9b3cf94. When no store is supplied, falls back to the
+    process-wide singleton (if one is running) and finally to building a
+    fresh one, matching prior behavior for callers with neither (e.g. tests
+    that call ``route_parallel`` directly).
+
     Returns results in the same order as ``calls`` so callers can zip
     with tool_use_ids.
     """
     if retrieved_knowledge_map is None:
-        # One store, built once, shared across every specialist and every
-        # retrieval path in this batch. chromadb's PersistentClient is NOT
-        # safe to construct concurrently against the same on-disk path from
-        # multiple threads (reproduced independently of this feature --
-        # constructing 4 stores concurrently via asyncio.gather+to_thread
-        # crashes with 'RustBindingsAPI' object has no attribute 'bindings',
-        # using only pre-existing ChromaDBStore code, unrelated to anything
-        # below). Concurrent *queries* against one already-built shared
-        # store are fine -- verified directly before landing this fix.
-        # This closes the race this batch's own fan-out would otherwise
-        # introduce; it does NOT close the same race against other
-        # subsystems that build their own independent stores from
-        # background tasks (scheduler, skills_tools, notion_sync,
-        # documents) -- tracked separately in issue #13.
-        #
-        # Built via to_thread, not inline: PersistentClient construction
-        # opens SQLite and initializes the embedding backend, which would
-        # otherwise block the whole event loop (every in-flight SSE stream)
-        # for its duration.
-        from openexecutive.config import get_settings
-        from openexecutive.knowledge.store import ChromaDBStore as _ChromaDBStore
+        if store is not None:
+            shared_store = store
+        else:
+            # Deliberately not a call to store_access.get_shared_store():
+            # that helper's own fallback constructs inline (fine for the
+            # tool handlers, which are dispatched outside the event loop's
+            # hot path), but this fallback specifically needs the
+            # to_thread wrap below since a live SSE stream may be
+            # in flight on this same loop.
+            from openexecutive.mcp_server.server import get_store as _get_shared_store
 
-        def _build_store() -> _ChromaDBStore:
-            return _ChromaDBStore(persist_directory=get_settings().vector_store_path)
+            shared_store = _get_shared_store()
+            if shared_store is None:
+                # Built via to_thread, not inline: PersistentClient construction
+                # opens SQLite and initializes the embedding backend, which would
+                # otherwise block the whole event loop (every in-flight SSE
+                # stream) for its duration. Only reached when neither a
+                # caller-supplied store nor the process-wide singleton is
+                # available (e.g. tests calling route_parallel directly, or a
+                # lifespan-less process).
+                from openexecutive.config import get_settings
+                from openexecutive.knowledge.store import ChromaDBStore as _ChromaDBStore
 
-        shared_store = await asyncio.to_thread(_build_store)
+                def _build_store() -> _ChromaDBStore:
+                    return _ChromaDBStore(persist_directory=get_settings().vector_store_path)
+
+                shared_store = await asyncio.to_thread(_build_store)
         knowledge_futures = [_retrieve_for_call(c, shared_store) for c in calls]
         failures_futures = [_retrieve_failures_for_call(c, shared_store) for c in calls]
         skills_futures = [_retrieve_skills_for_call(c, shared_store) for c in calls]

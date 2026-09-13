@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openexecutive.audit import log_event as audit_log
+from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +61,6 @@ async def handle_run_executive_research(
 ) -> str:
     note = str(tool_input.get("note", "")).strip()
 
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import (
         complete_run,
@@ -90,7 +89,7 @@ async def handle_run_executive_research(
     artifact = ""
     result_data: dict[str, Any] = {}
     last_error = ""
-    store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+    store = _get_store()
     try:
         async for event in workflow.run(inputs=wf_inputs, store=store):
             if event.type == "result" and event.data:

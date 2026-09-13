@@ -7,7 +7,10 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from openexecutive.knowledge.store import ChromaDBStore
 
 from openexecutive.audit import bind_turn, clear_turn, set_turn
 from openexecutive.audit import log_event as audit_log
@@ -423,10 +426,15 @@ class Executive:
     never exposed to the user.
     """
 
-    def __init__(self, mcp_gateway: MCPGateway | None = None) -> None:
+    def __init__(
+        self,
+        mcp_gateway: MCPGateway | None = None,
+        store: ChromaDBStore | None = None,
+    ) -> None:
         self._settings = get_settings()
         self._mcp_gateway = mcp_gateway
         self._mcp_tools = MCP_TOOLS if mcp_gateway is not None else []
+        self._store = store
 
     def _build_messages(
         self,
@@ -1420,6 +1428,7 @@ class Executive:
                     episodic_context=episodic_context,
                     session_id=session_id,
                     debug_collector=debug_collector,
+                    store=self._store,
                 )
                 spec_ms = round((time.monotonic() - spec_t0) * 1000)
                 for tu, result in zip(

@@ -17,3 +17,21 @@ def reset_active_gateway():
     set_active_gateway(None)
     yield
     set_active_gateway(None)
+
+
+@pytest.fixture(autouse=True)
+def reset_active_store():
+    """Ensure the module-level ChromaDB store singleton is cleared between tests.
+
+    Mirrors reset_active_gateway above. Any test that runs the real FastAPI
+    lifespan (``with TestClient(app):``) calls ``mcp_server.set_store()`` and,
+    without this reset, leaves that store sitting in the global for every
+    later test in the same process -- silently defeating any subsequent
+    test's `ChromaDBStore` monkeypatch, since the orchestrator tool-handler
+    modules' `_get_store()` helpers check this singleton before ever
+    consulting `ChromaDBStore`.
+    """
+    from openexecutive.mcp_server.server import set_store
+    set_store(None)
+    yield
+    set_store(None)

@@ -18,15 +18,9 @@ from openexecutive.knowledge.skills_repo import (
     SkillNotFoundError,
     SkillReadOnlyError,
 )
-from openexecutive.knowledge.store import ChromaDBStore
+from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 
 logger = logging.getLogger(__name__)
-
-
-def _get_store() -> ChromaDBStore:
-    from openexecutive.config import get_settings
-
-    return ChromaDBStore(persist_directory=get_settings().vector_store_path)
 
 
 SKILL_TOOLS: list[dict[str, Any]] = [

@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openexecutive.audit import log_event as audit_log
+from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 from openexecutive.staff_onboarding import service, store
 from openexecutive.staff_onboarding.models import OnboardingStatus, TaskStatus
 
@@ -372,8 +373,6 @@ async def handle_activate_onboarding_plan(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_start_onboarding(tool_input: dict[str, Any]) -> str:
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import complete_run, create_run, fail_run
 
@@ -394,7 +393,7 @@ async def handle_start_onboarding(tool_input: dict[str, Any]) -> str:
 
     artifact = ""
     last_error = ""
-    chroma = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+    chroma = _get_store()
     try:
         async for event in workflow.run(inputs=wf_inputs, store=chroma):
             if event.type == "artifact" and event.content:

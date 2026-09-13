@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openexecutive.audit import log_event as audit_log
+from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 
 logger = logging.getLogger(__name__)
 
@@ -184,8 +185,6 @@ async def handle_list_workflows(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.workflows import get_workflow
     from openexecutive.workflows.persistence import (
         complete_run,
@@ -238,7 +237,7 @@ async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
         logger.exception("run_workflow: create_run failed")
         return _err("run_workflow", f"could not start run: {exc}", kind="write")
 
-    store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+    store = _get_store()
     artifact = ""
     last_error = ""
     awaiting: dict[str, Any] | None = None

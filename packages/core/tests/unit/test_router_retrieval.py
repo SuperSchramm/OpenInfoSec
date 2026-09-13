@@ -93,6 +93,92 @@ def test_route_parallel_auto_retrieves_per_specialist(
     assert "burn" not in stub_agents["chro"][0]["retrieved"]
 
 
+def test_route_parallel_reuses_supplied_store_without_constructing_one(
+    stub_agents: dict[str, list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller-supplied ``store`` (e.g. app.state.store) is passed straight
+    through to every retrieval path -- route_parallel must NOT construct its
+    own ChromaDBStore in this case (issue #13 Phase 1: constructing a second
+    client concurrently with the caller's own singleton is what crashes).
+    """
+
+    sentinel_store = object()
+    seen_stores: list[Any] = []
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("route_parallel constructed its own store despite store= being supplied")
+
+    monkeypatch.setattr("openexecutive.knowledge.store.ChromaDBStore", boom)
+
+    def fake_retrieve(query: str, specialist_name: str | None = None, store: Any = None, **_: Any) -> str:
+        seen_stores.append(store)
+        return ""
+
+    def fake_retrieve_side(store: Any = None, **_: Any) -> str:
+        seen_stores.append(store)
+        return ""
+
+    monkeypatch.setattr("openexecutive.knowledge.retriever.retrieve", fake_retrieve)
+    monkeypatch.setattr("openexecutive.knowledge.retriever.retrieve_failures", fake_retrieve_side)
+    monkeypatch.setattr("openexecutive.knowledge.retriever.retrieve_skills", fake_retrieve_side)
+    # skills_active_for also receives the shared store -- stub it so it
+    # never has to distinguish the sentinel from a real store.
+    monkeypatch.setattr(
+        "openexecutive.knowledge.skills_index.skills_active_for",
+        lambda *_a, **_k: False,
+    )
+
+    results = asyncio.run(
+        router.route_parallel(
+            calls=[{"specialist": "cfo", "query": "what is our burn?"}],
+            store=sentinel_store,
+        )
+    )
+
+    assert results == ["answer-from-cfo"]
+    assert seen_stores, "expected the sentinel store to reach at least one retrieval path"
+    assert all(s is sentinel_store for s in seen_stores)
+
+
+def test_route_parallel_falls_back_to_process_singleton_before_constructing(
+    stub_agents: dict[str, list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When no ``store`` kwarg is passed, route_parallel should still prefer
+    the process-wide mcp_server singleton (if one is running) over building
+    a fresh ChromaDBStore -- the same singleton the 5 tool-handler modules
+    were fixed to prefer in issue #13 Phase 1.
+    """
+
+    singleton_store = object()
+    seen_stores: list[Any] = []
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("route_parallel constructed its own store despite the singleton being set")
+
+    monkeypatch.setattr("openexecutive.knowledge.store.ChromaDBStore", boom)
+    monkeypatch.setattr("openexecutive.mcp_server.server.get_store", lambda: singleton_store)
+
+    def fake_retrieve_side(store: Any = None, **_: Any) -> str:
+        seen_stores.append(store)
+        return ""
+
+    monkeypatch.setattr("openexecutive.knowledge.retriever.retrieve", fake_retrieve_side)
+    monkeypatch.setattr("openexecutive.knowledge.retriever.retrieve_failures", fake_retrieve_side)
+    monkeypatch.setattr("openexecutive.knowledge.retriever.retrieve_skills", fake_retrieve_side)
+    monkeypatch.setattr(
+        "openexecutive.knowledge.skills_index.skills_active_for",
+        lambda *_a, **_k: False,
+    )
+
+    results = asyncio.run(
+        router.route_parallel(calls=[{"specialist": "cfo", "query": "what is our burn?"}])
+    )
+
+    assert results == ["answer-from-cfo"]
+    assert seen_stores, "expected the singleton to reach at least one retrieval path"
+    assert all(s is singleton_store for s in seen_stores)
+
+
 def test_route_parallel_uses_supplied_map_when_provided(
     stub_agents: dict[str, list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
 ) -> None:

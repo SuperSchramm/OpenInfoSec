@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openexecutive.audit import log_event as audit_log
+from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 from openexecutive.talent.models import CandidateStage, EngagementStatus, OfferStatus
 
 logger = logging.getLogger(__name__)
@@ -530,8 +531,6 @@ async def handle_get_candidate(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_match_candidates(tool_input: dict[str, Any]) -> str:
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.talent import graph as talent_graph
     from openexecutive.talent import store as talent_store
 
@@ -555,7 +554,7 @@ async def handle_match_candidates(tool_input: dict[str, Any]) -> str:
         return json.dumps({"status": "not_found", "engagement_id": engagement_id})
 
     try:
-        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+        store = _get_store()
         matches = talent_graph.match_candidates_for_engagement(engagement, store, limit=limit)
     except Exception as exc:
         logger.exception("match_candidates: graph query failed")
@@ -645,8 +644,6 @@ async def handle_set_candidate_stage(tool_input: dict[str, Any]) -> str:
 async def handle_start_talent_workflow(tool_input: dict[str, Any]) -> str:
     from datetime import UTC, datetime, timedelta
 
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import (
         complete_run,
@@ -684,7 +681,7 @@ async def handle_start_talent_workflow(tool_input: dict[str, Any]) -> str:
     artifact = ""
     last_error = ""
     awaiting: dict[str, Any] | None = None
-    store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+    store = _get_store()
     try:
         async for event in workflow.run(inputs=wf_inputs, store=store):
             # An approval-gate step yields a WaitForHumanEvent (not a
@@ -815,8 +812,6 @@ async def handle_create_engagement(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_create_candidate(tool_input: dict[str, Any]) -> str:
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
     from openexecutive.talent import graph as talent_graph
     from openexecutive.talent import store as talent_store
 
@@ -900,7 +895,7 @@ async def handle_create_candidate(tool_input: dict[str, Any]) -> str:
     # /talent API route does the same after an insert. index_candidate swallows
     # its own vector-store failures, so a bad index never fails the create.
     try:
-        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+        store = _get_store()
         talent_graph.index_candidate(candidate, store)
     except Exception:  # noqa: BLE001 — index sync must never break the write
         logger.warning("create_candidate: indexing %s failed", candidate_id, exc_info=True)
