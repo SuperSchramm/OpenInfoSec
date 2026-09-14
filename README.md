@@ -54,7 +54,7 @@ Synthesized executive response
 
 **Prompt caching** — The system prompt is structured so the Executive persona, company profile, and knowledge index are cached separately (up to 85% cache hit rate after the first few turns). No dynamic content ever goes in a cached block.
 
-See [docs/architecture.md](docs/architecture.md) for the full design.
+See [docs/architecture.md](docs/architecture.md) for an architecture overview and pointers to the authoritative source for each subsystem's current details.
 
 ## Tech Stack
 

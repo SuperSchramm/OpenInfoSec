@@ -87,7 +87,7 @@ Built-in MBA knowledge + Your company documents
 Synthesized executive response
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the full design.
+See [docs/architecture.md](docs/architecture.md) for an architecture overview and pointers to the authoritative source for each subsystem's current details.
 
 ## Adding a New Specialist Agent
 
