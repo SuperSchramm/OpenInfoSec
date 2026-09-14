@@ -77,6 +77,41 @@ async def test_download_bytes_raises_when_actual_content_exceeds_limit():
 
 
 # --------------------------------------------------------------------------- #
+# _schedule_ingest
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_schedule_ingest_uses_shared_store_not_a_fresh_construction():
+    """Regression test for issue #18: the background ingest task must reuse
+    the process-wide store via get_shared_store() instead of constructing a
+    fresh ChromaDBStore() (which defaults to a cwd-relative ./chroma_db
+    instead of settings.vector_store_path).
+    """
+    from openexecutive.integrations import attachments
+
+    fake_store = MagicMock()
+
+    with (
+        patch(
+            "openexecutive.orchestrator.store_access.get_shared_store",
+            return_value=fake_store,
+        ) as mock_get_store,
+        patch(
+            "openexecutive.knowledge.loader.ingest_file",
+            AsyncMock(return_value=3),
+        ) as mock_ingest,
+    ):
+        attachments._schedule_ingest(b"hello world", "notes.txt")
+        pending = list(attachments._ingest_tasks)
+        assert pending, "expected a background ingest task to be scheduled"
+        await asyncio.gather(*pending)
+
+    mock_get_store.assert_called_once()
+    mock_ingest.assert_awaited_once()
+    assert mock_ingest.await_args.args[1] is fake_store
+
+
+# --------------------------------------------------------------------------- #
 # build_attachment_output — image routing
 # --------------------------------------------------------------------------- #
 

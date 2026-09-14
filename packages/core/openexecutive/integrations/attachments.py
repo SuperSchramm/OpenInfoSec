@@ -159,9 +159,9 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
         suffix = _suffix_from_filename(filename)
         try:
             from openexecutive.knowledge.loader import ingest_file
-            from openexecutive.knowledge.store import ChromaDBStore
+            from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 
-            store = ChromaDBStore()
+            store = _get_store()
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp.write(data)
                 tmp_path = Path(tmp.name)
