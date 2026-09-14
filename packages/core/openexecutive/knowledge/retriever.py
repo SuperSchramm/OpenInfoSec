@@ -213,7 +213,9 @@ def retrieve(
         distance_threshold = settings.knowledge_distance_threshold
 
     if store is None:
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        from openexecutive.orchestrator.store_access import get_shared_store
+
+        store = get_shared_store()
 
     rs = review_store or _default_review_store()
     rejected_builtin = rs.get_rejected_filenames(ContentType.BUILTIN)
@@ -380,7 +382,9 @@ def retrieve_failures(
 
     settings = get_settings()
     if store is None:
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        from openexecutive.orchestrator.store_access import get_shared_store
+
+        store = get_shared_store()
 
     effective_domains = domain_filter
     if effective_domains is None and specialist_name:
@@ -500,7 +504,9 @@ def retrieve_skills(
         return ""
 
     if store is None:
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        from openexecutive.orchestrator.store_access import get_shared_store
+
+        store = get_shared_store()
 
     try:
         active = skills_active_for(specialist_name, store)

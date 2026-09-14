@@ -43,20 +43,27 @@ def get_shared_store() -> ChromaDBStore:
 
 def publish_swapped_store(app_state: Any | None, new_store: ChromaDBStore) -> None:
     """Publish a freshly-constructed store after a destructive vector-store
-    operation (fixture load/unload/reset, a client-slot switch): sets it on
-    ``app_state.store`` AND refreshes the ``mcp_server`` singleton
-    ``get_shared_store()`` reads for tool handlers with no Request/app access.
+    operation (fixture load/unload/reset, a client-slot switch): refreshes
+    the ``mcp_server`` singleton ``get_shared_store()`` reads for tool
+    handlers with no Request/app access, and -- when an ``app_state`` is
+    available -- ``app_state.store`` too.
 
-    Before issue #16, each of the 4 swap sites updated only ``app_state.store``
-    directly -- the singleton kept pointing at the pre-swap store indefinitely.
+    Before issue #16, each of the 4 original swap sites updated only
+    ``app_state.store`` directly -- the singleton kept pointing at the
+    pre-swap store indefinitely.
 
-    No-ops if ``app_state`` is ``None`` or has no ``store`` attribute yet
-    (matches each call site's pre-existing guard -- a bare CLI/eval process
-    with no FastAPI ``app.state`` has nothing to publish to).
+    The singleton refresh is unconditional (unlike ``app_state.store``,
+    which needs somewhere to write to): every caller of this function is
+    already running in-process under the API's lifespan -- there is no
+    genuinely standalone caller that lacks both an app_state AND a live
+    singleton to refresh. A caller with no ``app_state`` (issue #15's
+    follow-up: the scheduler's client-rotation path calls
+    ``clients.slots._rebuild_vector_state`` with ``app_state=None``) would
+    otherwise leave the singleton stale after its swap even though the
+    process-wide store it should refresh is very much live.
     """
-    if app_state is None or not hasattr(app_state, "store"):
-        return
     from openexecutive.mcp_server import server as mcp_server
 
-    app_state.store = new_store
     mcp_server.set_store(new_store)
+    if app_state is not None and hasattr(app_state, "store"):
+        app_state.store = new_store

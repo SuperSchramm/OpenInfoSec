@@ -56,26 +56,34 @@ def test_publish_swapped_store_updates_both_app_state_and_singleton(
     assert captured == [new_store]
 
 
-def test_publish_swapped_store_noop_when_app_state_is_none(
+def test_publish_swapped_store_still_refreshes_singleton_when_app_state_is_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def boom(*_a: Any, **_k: Any) -> Any:
-        raise AssertionError("publish_swapped_store() called set_store() with no app_state")
+    """Issue #15 follow-up: the scheduler's client-rotation path calls the
+    swap site with no app_state, but still runs in-process under the API's
+    lifespan — the singleton refresh must not be skipped just because
+    there's no app_state.store to also update."""
+    captured: list[Any] = []
+    monkeypatch.setattr(mcp_server, "set_store", captured.append)
 
-    monkeypatch.setattr(mcp_server, "set_store", boom)
+    new_store = object()
+    store_access.publish_swapped_store(None, new_store)  # must not raise
 
-    store_access.publish_swapped_store(None, object())  # must not raise
+    assert captured == [new_store]
 
 
-def test_publish_swapped_store_noop_when_app_state_has_no_store_attr(
+def test_publish_swapped_store_still_refreshes_singleton_when_app_state_has_no_store_attr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def boom(*_a: Any, **_k: Any) -> Any:
-        raise AssertionError("publish_swapped_store() called set_store() with no store attr")
-
-    monkeypatch.setattr(mcp_server, "set_store", boom)
+    captured: list[Any] = []
+    monkeypatch.setattr(mcp_server, "set_store", captured.append)
 
     class _BareAppState:
         pass
 
-    store_access.publish_swapped_store(_BareAppState(), object())  # must not raise
+    bare = _BareAppState()
+    new_store = object()
+    store_access.publish_swapped_store(bare, new_store)  # must not raise
+
+    assert captured == [new_store]
+    assert not hasattr(bare, "store")  # nothing to update, correctly skipped

@@ -200,3 +200,49 @@ def test_rebuild_vector_state_refreshes_mcp_server_singleton(tmp_path: Path) -> 
 
     assert docs_indexed == 0  # no docs in the empty tmp docs dir
     assert mcp_server.get_store() is app_state.store
+
+
+def test_rebuild_vector_state_refreshes_singleton_even_with_no_app_state(
+    tmp_path: Path,
+) -> None:
+    """Issue #15 follow-up (found by adversarial review): the scheduler's
+    client-rotation path calls this with app_state=None, but still runs
+    in-process under the API's lifespan. The singleton refresh must not be
+    skipped just because there's no app_state.store to also update —
+    before this fix, an automated rotation left mcp_server's singleton
+    (and therefore every no-Request tool handler) pointing at the
+    pre-rotation client's store indefinitely."""
+    profile_path = tmp_path / "company" / "profile.yaml"
+    docs_dir = profile_path.parent / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    settings = type(
+        "S",
+        (),
+        {
+            "vector_store_path": tmp_path / "chroma",
+            "company_profile_path": profile_path,
+        },
+    )()
+
+    original_init = ChromaDBStore.__init__
+    constructed: list[Any] = []
+
+    def _tracking_init(self: Any, *a: Any, **k: Any) -> None:
+        constructed.append(self)
+        original_init(self, *a, **k)
+
+    with (
+        patch.object(ChromaDBStore, "__init__", _tracking_init),
+        patch.object(ChromaDBStore, "delete_company_docs", lambda self: None),
+        patch.object(ChromaDBStore, "delete_documents", lambda self, **kw: None),
+        patch.object(ChromaDBStore, "delete_notion_docs", lambda self: None),
+    ):
+        asyncio.run(slots._rebuild_vector_state(settings, None))
+
+    # Exactly one ChromaDBStore built (not a second one for the publish
+    # step — reviewer observation: publish_swapped_store going unconditional
+    # meant this path went from 0-or-1 to always-2 constructions until the
+    # swap call was pointed at the same `store` already used for the
+    # delete/reindex work above).
+    assert len(constructed) == 1
+    assert mcp_server.get_store() is constructed[0]

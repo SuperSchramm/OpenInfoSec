@@ -652,15 +652,17 @@ async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
             except Exception:
                 logger.exception("client-slots: reindex skill failed")
 
-    # Guarded here (rather than inside the helper) so a switch with no
-    # app_state skips constructing a second ChromaDBStore that nothing
-    # would use.
-    if app_state is not None and hasattr(app_state, "store"):
-        from openexecutive.orchestrator.store_access import publish_swapped_store
+    # Unconditional (issue #15 follow-up): the scheduler's client-rotation
+    # path calls this with app_state=None, but it still runs in-process
+    # under the API's lifespan -- the mcp_server singleton publish_swapped_store
+    # refreshes is very much live even when there's no app_state to also
+    # update. publish_swapped_store no-ops the app_state.store half itself
+    # when app_state is None. Publishes the same `store` used for the
+    # delete/reindex work above (not a second construction) -- it already
+    # reflects the post-swap state at the same persist_directory.
+    from openexecutive.orchestrator.store_access import publish_swapped_store
 
-        publish_swapped_store(
-            app_state, ChromaDBStore(persist_directory=settings.vector_store_path)
-        )
+    publish_swapped_store(app_state, store)
     return docs_indexed
 
 

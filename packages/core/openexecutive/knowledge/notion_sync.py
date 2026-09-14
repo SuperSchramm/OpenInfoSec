@@ -872,7 +872,12 @@ async def run_notion_sync(
         return stats
 
     if store is None:
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        # Only the scheduler's cadence-fired call (runner.py) hits this path
+        # (cli.py always passes its own store) — that call runs in-process
+        # under the API's lifespan, so the shared singleton is available.
+        from openexecutive.orchestrator.store_access import get_shared_store
+
+        store = get_shared_store()
 
     generation = get_active_client(settings)
     own_client = client is None

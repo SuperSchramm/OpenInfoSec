@@ -451,3 +451,40 @@ async def test_clearing_history_lets_an_unchanged_scan_run_again(
     # Same state, but the gate has no prior run to compare against → runs.
     await research_scheduler.run_watchlist_research_scan(db_path=db, store=MagicMock())
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_scan_uses_shared_store_when_none_injected(
+    db: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for issue #15: production omits ``store=`` entirely
+    (only tests inject a stub) — that fallback must reuse the process-wide
+    singleton via get_shared_store(), not construct an unconfigured store."""
+    received: dict[str, Any] = {}
+
+    async def capturing_run(*, inputs: Any, store: Any):
+        from openexecutive.workflows.base import WorkflowEvent
+        received["store"] = store
+        yield WorkflowEvent(type="result", data={"findings": [], "tool_calls": []})
+        yield WorkflowEvent(type="artifact", content="(quiet run)")
+        yield WorkflowEvent(type="done")
+
+    workflow = MagicMock()
+    workflow.run = capturing_run
+    workflow.input_model.return_value = _MinimalInput
+    workflow.title = "Executive Research"
+    monkeypatch.setitem(
+        __import__(
+            "openexecutive.workflows", fromlist=["WORKFLOW_REGISTRY"]
+        ).WORKFLOW_REGISTRY,
+        "executive_research", workflow,
+    )
+
+    shared = object()
+    monkeypatch.setattr(
+        "openexecutive.orchestrator.store_access.get_shared_store", lambda: shared
+    )
+
+    await research_scheduler.run_watchlist_research_scan(db_path=db, store=None)
+
+    assert received["store"] is shared

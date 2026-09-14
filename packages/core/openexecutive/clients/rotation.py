@@ -228,7 +228,7 @@ async def _run_quiet_work_for_live_client(settings: Any, slug: str) -> None:
     # deliberately NOT delivered to anyone from here. Brief failures
     # PROPAGATE: the caller records the client under ``failed`` so the
     # digest never claims a brief that wasn't generated.
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.orchestrator.store_access import get_shared_store
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import complete_run, create_run, fail_run
 
@@ -241,7 +241,7 @@ async def _run_quiet_work_for_live_client(settings: Any, slug: str) -> None:
         f"Overnight brief — {slug}",
         inputs.model_dump(),
     )
-    store = ChromaDBStore(persist_directory=settings.vector_store_path)
+    store = get_shared_store()
     artifact = ""
     try:
         async for event in workflow.run(inputs, store):

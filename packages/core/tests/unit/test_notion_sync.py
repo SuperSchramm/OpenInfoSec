@@ -156,6 +156,66 @@ def test_numbered_list_uses_index() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_uses_shared_store_when_none_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for issue #15: the only production caller with no
+    store (scheduler/runner.py's cadence-fired tick) must reuse the
+    process-wide singleton via get_shared_store(), not construct a fresh,
+    unconfigured store. cli.py's callers always pass their own store, so
+    this fallback path had no test coverage before."""
+    state_file = _sync_env(tmp_path, monkeypatch)
+    state_file.write_text(
+        json.dumps({"watermark": None, "pages": {}}) + "\n", encoding="utf-8"
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [], "has_more": False})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport, headers={"Authorization": "Bearer x"})
+    docs = tmp_path / "docs"
+    docs.mkdir(exist_ok=True)
+
+    shared = FakeStore()
+    got_shared_store_calls = []
+
+    def _fake_get_shared_store() -> FakeStore:
+        got_shared_store_calls.append(1)
+        return shared
+
+    monkeypatch.setattr(
+        "openexecutive.orchestrator.store_access.get_shared_store",
+        _fake_get_shared_store,
+    )
+
+    class _GuardedChromaDBStore(ChromaDBStore):
+        """Subclasses the real class so NOTION_COLLECTION/COMPANY_COLLECTION
+        class-attribute access (used throughout a real sync tick) still
+        works — only blocks *construction*, which the fallback must not do."""
+
+        def __new__(cls, *_a: Any, **_k: Any) -> _GuardedChromaDBStore:
+            raise AssertionError(
+                "run_notion_sync constructed a fresh ChromaDBStore instead of "
+                "using get_shared_store()"
+            )
+
+    monkeypatch.setattr(
+        "openexecutive.knowledge.notion_sync.ChromaDBStore", _GuardedChromaDBStore
+    )
+
+    with (
+        patch("openexecutive.knowledge.notion_sync._state_path", return_value=state_file),
+        patch("openexecutive.knowledge.notion_sync._docs_dir", return_value=docs),
+        patch("openexecutive.knowledge.notion_sync._sleep", new=AsyncMock()),
+    ):
+        # No store= passed — must hit the get_shared_store() fallback.
+        await run_notion_sync(client=client)
+
+    assert got_shared_store_calls == [1]
+
+
+@pytest.mark.asyncio
 async def test_run_disabled_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "openexecutive.knowledge.notion_sync.get_settings",

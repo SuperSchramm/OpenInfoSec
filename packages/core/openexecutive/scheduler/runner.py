@@ -260,9 +260,10 @@ async def _execute_action(
         try:
             import uuid as _uuid
 
-            from openexecutive.config import get_settings as _get_settings
             from openexecutive.departments.cadence import enqueue_next
-            from openexecutive.knowledge.store import ChromaDBStore as _ChromaDBStore
+            from openexecutive.orchestrator.store_access import (
+                get_shared_store as _get_store,
+            )
             from openexecutive.workflows.department_check_in import (
                 DepartmentCheckInInput,
                 DepartmentCheckInWorkflow,
@@ -285,9 +286,7 @@ async def _execute_action(
                 wf_inputs.model_dump(),
             )
 
-            store = _ChromaDBStore(
-                persist_directory=_get_settings().vector_store_path
-            )
+            store = _get_store()
             workflow = DepartmentCheckInWorkflow()
             artifact = ""
             async for event in workflow.run(inputs=wf_inputs, store=store):
@@ -1263,8 +1262,7 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
     import contextlib
     import uuid
 
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.orchestrator.store_access import get_shared_store
     from openexecutive.workflows import get_workflow
     from openexecutive.workflows.dynamic_cadence import (
         schedule_dynamic_workflow_cadence,
@@ -1289,7 +1287,7 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
         create_run(
             run_id, name, f"{workflow.title} {now.strftime('%Y-%m-%d')}", wf_inputs.model_dump()
         )
-        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+        store = get_shared_store()
         artifact = ""
         async for event in workflow.run(inputs=wf_inputs, store=store):
             etype = getattr(event, "type", None)
@@ -1341,8 +1339,7 @@ async def _run_principal_brief(action: ScheduledAction, now: datetime) -> None:
     import uuid
 
     from openexecutive.audit import log_event as audit_log
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.orchestrator.store_access import get_shared_store
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import (
         complete_run,
@@ -1367,7 +1364,7 @@ async def _run_principal_brief(action: ScheduledAction, now: datetime) -> None:
             run_id, workflow_name, f"{workflow.title} {now.strftime('%Y-%m-%d')}",
             wf_inputs.model_dump(),
         )
-        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+        store = get_shared_store()
         artifact = ""
         async for event in workflow.run(inputs=wf_inputs, store=store):
             if event.type == "artifact" and event.content:
@@ -1428,8 +1425,7 @@ async def _run_executive_reflection(
     import uuid
 
     from openexecutive.audit import log_event as audit_log
-    from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.orchestrator.store_access import get_shared_store
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import (
         complete_run,
@@ -1450,7 +1446,7 @@ async def _run_executive_reflection(
             f"{workflow.title} {now.strftime('%Y-%m-%d')}",
             wf_inputs.model_dump(),
         )
-        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+        store = get_shared_store()
         artifact = ""
         async for event in workflow.run(inputs=wf_inputs, store=store):
             if event.type == "artifact" and event.content:

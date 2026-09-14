@@ -279,11 +279,10 @@ def _collect_health() -> dict[str, Any]:
     """Best-effort health snapshot. Anything that throws is dropped."""
     snapshot: dict[str, Any] = {}
     try:
-        from openexecutive.config import get_settings
         from openexecutive.knowledge.store import ChromaDBStore
+        from openexecutive.orchestrator.store_access import get_shared_store
 
-        settings = get_settings()
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        store = get_shared_store()
         snapshot["builtin_knowledge_chunks"] = store.get_collection_count(
             ChromaDBStore.BUILTIN_COLLECTION
         )

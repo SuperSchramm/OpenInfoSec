@@ -396,8 +396,7 @@ async def run_watchlist_research_scan(
         )
 
     try:
-        from openexecutive.config import get_settings
-        from openexecutive.knowledge.store import ChromaDBStore
+        from openexecutive.orchestrator.store_access import get_shared_store
         from openexecutive.workflows import WORKFLOW_REGISTRY
         from openexecutive.workflows.persistence import (
             complete_run,
@@ -422,13 +421,11 @@ async def run_watchlist_research_scan(
         except Exception:
             logger.exception("research.scheduler: create_run failed")
 
-        # Tests inject a stub store; production goes through the
-        # default ChromaDBStore. We don't construct it unconditionally
-        # because the default constructor would crash in environments
-        # without a chroma_db directory wired up.
-        effective_store = store if store is not None else ChromaDBStore(
-            persist_directory=get_settings().vector_store_path
-        )
+        # Tests inject a stub store; production reuses the process-wide
+        # singleton via get_shared_store() (issue #15) — the only production
+        # caller (scheduler/runner.py) runs in-process under the API's
+        # lifespan, where that singleton is always available.
+        effective_store = store if store is not None else get_shared_store()
         artifact = ""
         findings: list[dict[str, Any]] = []
         tool_calls: list[dict[str, Any]] = []
