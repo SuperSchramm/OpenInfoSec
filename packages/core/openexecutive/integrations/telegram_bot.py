@@ -209,8 +209,15 @@ async def _process_and_reply(
                     # build_attachment_output works on bytes directly — we
                     # don't need AttachmentItem/process_attachments here since
                     # Telegram requires a separate getFile API call rather than
-                    # a direct URL download.
-                    att_text, img_blocks = build_attachment_output(filename, data, content_type)
+                    # a direct URL download. authorized=True: this function
+                    # only runs as a background task scheduled by
+                    # telegram_webhook() AFTER its own roster gate passes
+                    # (find_person_by_telegram_chat_id) — unlike Discord's
+                    # on_message (issue #21), the roster check here already
+                    # happened before this code is ever reached.
+                    att_text, img_blocks = build_attachment_output(
+                        filename, data, content_type, authorized=True
+                    )
                     if att_text:
                         message_text = (
                             f"{att_text}\n\n{message_text}" if message_text else att_text

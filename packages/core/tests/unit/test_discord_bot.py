@@ -4,7 +4,8 @@ All Discord client objects are mocked — no network calls are made.
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -2010,3 +2011,121 @@ def test_discord_mention_thread_threshold_rejects_negative():
         pytest.raises(ValidationError),
     ):
         Settings()  # type: ignore[call-arg]
+
+
+# --------------------------------------------------------------------------- #
+# on_message — attachment ingest must not run before the roster check
+# (issue #21: process_attachments() fired unconditionally, 63 lines before
+# _handle_message's roster gate, so an unrostered DM's attachments could be
+# ingested into the shared knowledge base before the sender was rejected)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def discord_bot_instance():
+    """Real commands.Bot from create_discord_bot() — on_message is
+    registered via @bot.event, so it's directly callable as bot.on_message
+    with no gateway connection needed (Bot() construction does no network
+    I/O; only bot.run()/start() would)."""
+    with patch(
+        "openexecutive.config.get_settings",
+        return_value=MagicMock(discord_bot_token="fake-token-for-test"),
+    ):
+        from openexecutive.integrations.discord_bot import create_discord_bot
+
+        bot = create_discord_bot()
+    bot.process_commands = AsyncMock()
+    return bot
+
+
+def _make_attachment_message(discord_module, *, author_id: int = 555, message_id: int = 1234):
+    msg = MagicMock()
+    msg.author = MagicMock(bot=False)
+    msg.author.id = author_id
+    msg.content = "please read this"
+    msg.attachments = [
+        MagicMock(url="https://cdn.example.com/report.txt", filename="report.txt",
+                   content_type="text/plain", size=100)
+    ]
+    msg.channel = MagicMock(spec=discord_module.DMChannel)
+    msg.mentions = []
+    msg.id = message_id
+    return msg
+
+
+@contextmanager
+def _patched_on_message_deps(discord_bot_instance, *, rostered: bool):
+    """Shared patch set for the three on_message/issue-#21 tests below —
+    only the roster-lookup result differs between them. Yields
+    (mock_process_attachments, mock_audit_log) so each test can assert on
+    whichever one it cares about."""
+    bot_user = MagicMock(id=999)
+    sender = MagicMock(id=1) if rostered else None
+    with (
+        patch.object(
+            type(discord_bot_instance), "user",
+            new_callable=PropertyMock, return_value=bot_user,
+        ),
+        patch(
+            "openexecutive.people.store.find_person_by_discord_id",
+            return_value=sender,
+        ),
+        patch(
+            "openexecutive.integrations.discord_bot._handle_message",
+            new=AsyncMock(),
+        ),
+        patch(
+            "openexecutive.integrations.attachments.process_attachments",
+            new=AsyncMock(return_value=("", [])),
+        ) as mock_process_attachments,
+        patch("openexecutive.audit.log_event") as mock_audit_log,
+    ):
+        yield mock_process_attachments, mock_audit_log
+
+
+@pytest.mark.asyncio
+async def test_on_message_passes_authorized_true_for_rostered_sender(
+    discord_module, discord_bot_instance
+):
+    with _patched_on_message_deps(discord_bot_instance, rostered=True) as (
+        mock_process_attachments,
+        _mock_audit_log,
+    ):
+        await discord_bot_instance.on_message(_make_attachment_message(discord_module))
+
+    assert mock_process_attachments.await_args.kwargs["authorized"] is True
+
+
+@pytest.mark.asyncio
+async def test_on_message_passes_authorized_false_for_unrostered_sender(
+    discord_module, discord_bot_instance
+):
+    with _patched_on_message_deps(discord_bot_instance, rostered=False) as (
+        mock_process_attachments,
+        _mock_audit_log,
+    ):
+        await discord_bot_instance.on_message(_make_attachment_message(discord_module))
+
+    assert mock_process_attachments.await_args.kwargs["authorized"] is False
+    # _handle_message still runs (mocked here) — it's the one that emits the
+    # AUDITED "rejected_unknown_sender" row. This early lookup exists only
+    # to gate the ingest side effect and must not short-circuit the turn.
+
+
+@pytest.mark.asyncio
+async def test_on_message_roster_lookup_emits_no_audit_row_of_its_own(
+    discord_module, discord_bot_instance
+):
+    """The early roster lookup in on_message (issue #21) is a plain lookup,
+    not an audit event — the existing "integration_inbound" /
+    "rejected_unknown_sender" audit trail must stay exactly where it is,
+    inside _handle_message. With _handle_message mocked away entirely, any
+    audit_log call observed here would have to come from on_message itself
+    — there should be none."""
+    # Unrostered — the case most likely to tempt a stray audit call.
+    with _patched_on_message_deps(discord_bot_instance, rostered=False) as (
+        _mock_process_attachments,
+        mock_audit_log,
+    ):
+        await discord_bot_instance.on_message(_make_attachment_message(discord_module))
+
+    mock_audit_log.assert_not_called()

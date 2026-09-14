@@ -210,11 +210,23 @@ def build_attachment_output(
     filename: str,
     data: bytes,
     content_type: str,
+    *,
+    authorized: bool,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Route one attachment to the right handler.
 
     Returns ``(extra_text, image_blocks)``.  Both may be empty — callers
     concatenate results across all attachments.
+
+    ``authorized`` gates ONLY the ChromaDB ingest side effect (issue #21) —
+    extracted text and image blocks are still returned regardless, since
+    those are only used for the calling turn's own reply and have no
+    persistent shared side effect. It's keyword-only and has no default so
+    every call site must consciously state whether the sender has cleared
+    that channel's own auth check (Discord's roster gate, Telegram's roster
+    gate, or the API's shared-secret middleware for the web chat upload
+    route) — a silent default here is exactly how #21 happened: attachment
+    processing ran unconditionally, 63 lines before Discord's roster check.
     """
     # Normalise content_type — some servers omit it or add parameters.
     # All normalization (non-standard aliases, suffix inference) happens once
@@ -255,7 +267,8 @@ def build_attachment_output(
         # untrusted content; no currently deployed mitigation exists here.
         # The Executive's system prompt and tool-call gating are the primary
         # defences; treat attachment sources the same as other untrusted inputs.
-        _schedule_ingest(data, filename)
+        if authorized:
+            _schedule_ingest(data, filename)
         return extra_text, []
 
     return f"(Could not read {filename}: unsupported type — supported: PDF, DOCX, TXT, MD, PNG, JPG, GIF, WebP)", []
@@ -268,12 +281,18 @@ def build_attachment_output(
 async def process_attachments(
     items: list[AttachmentItem],
     max_bytes: int = _DEFAULT_MAX_BYTES,
+    *,
+    authorized: bool,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Download and process a list of attachments.
 
     Returns ``(extra_text, image_blocks)``.  Items that fail to download
     or process are skipped with a log message — a single bad attachment
     must not prevent the user from getting a response.
+
+    ``authorized`` is forwarded to ``build_attachment_output`` for every
+    item — see that function's docstring for what it gates and why it has
+    no default (issue #21).
     """
     all_text_parts: list[str] = []
     all_image_blocks: list[dict[str, Any]] = []
@@ -297,7 +316,9 @@ async def process_attachments(
             continue
 
         try:
-            extra_text, image_blocks = build_attachment_output(item.filename, data, item.content_type)
+            extra_text, image_blocks = build_attachment_output(
+                item.filename, data, item.content_type, authorized=authorized
+            )
         except Exception:
             logger.exception("attachments: processing failed for %s", item.filename)
             all_text_parts.append(f"(Could not process {item.filename})")

@@ -1083,9 +1083,13 @@ def create_discord_bot():
     async def on_message(message: discord.Message) -> None:
         if message.author == bot.user:
             return
-        # Roster gate happens inside _handle_message after the
-        # integration_inbound audit row, so we get full observability
-        # for rejected attempts.
+        # The AUDITED roster gate (with its "rejected_unknown_sender" row)
+        # happens inside _handle_message after the integration_inbound audit
+        # row, so we get full observability for rejected attempts. A
+        # separate, silent roster lookup happens below, before attachment
+        # processing — see "sender_is_rostered" (issue #21) — purely to gate
+        # the ChromaDB-ingest side effect, not to replace or duplicate the
+        # audited gate.
 
         cleaned = _clean_message(message.content)
         # Allow attachment-only messages (no caption text) through the early
@@ -1103,6 +1107,22 @@ def create_discord_bot():
         discord_user_id = str(message.author.id)
         discord_channel = str(message.channel.id)
         message_id = str(message.id)
+
+        # issue #21: resolve roster status BEFORE attachment processing so
+        # an unrostered sender's attachments can't be ingested into the
+        # shared knowledge base. This is a plain lookup, not an audit event
+        # — the "integration_inbound" / "rejected_unknown_sender" audit
+        # trail stays exactly where it already is, inside _handle_message
+        # (see the comment above), so rejected attempts stay fully
+        # observable there. This lookup exists purely to gate the
+        # ChromaDB-ingest side effect silently, before it can fire.
+        from openexecutive.people.store import find_person_by_discord_id
+
+        sender_is_rostered = (
+            find_person_by_discord_id(discord_user_id) is not None
+            if discord_user_id
+            else False
+        )
 
         # ``new_thread_id`` is kept as a None sentinel here because
         # _compute_session_id still accepts it; the previous eager
@@ -1245,15 +1265,18 @@ def create_discord_bot():
                     process_attachments,
                 )
 
-                att_text, att_image_blocks = await process_attachments([
-                    AttachmentItem(
-                        url=a.url,
-                        filename=a.filename,
-                        content_type=a.content_type or "",
-                        size=a.size,
-                    )
-                    for a in message.attachments
-                ])
+                att_text, att_image_blocks = await process_attachments(
+                    [
+                        AttachmentItem(
+                            url=a.url,
+                            filename=a.filename,
+                            content_type=a.content_type or "",
+                            size=a.size,
+                        )
+                        for a in message.attachments
+                    ],
+                    authorized=sender_is_rostered,
+                )
                 if att_text:
                     cleaned = (f"{att_text}\n\n{cleaned}").strip() if cleaned else att_text
             except Exception:

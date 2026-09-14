@@ -618,8 +618,12 @@ async def chat_upload(
             )
 
         try:
+            # authorized=True: this route sits behind the API's shared-secret
+            # middleware (not in _UNAUTHENTICATED_PATHS, api/main.py) — the
+            # caller already cleared auth before reaching here, unlike
+            # Discord's on_message (issue #21).
             extra_text, blocks = build_attachment_output(
-                filename, data, upload.content_type or "",
+                filename, data, upload.content_type or "", authorized=True,
             )
         except Exception:
             logger.exception("chat_upload: processing failed for %s", filename)

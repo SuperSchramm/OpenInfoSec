@@ -117,7 +117,9 @@ async def test_schedule_ingest_uses_shared_store_not_a_fresh_construction():
 
 def test_build_attachment_output_png_returns_image_block():
     data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20  # fake PNG header
-    extra_text, image_blocks = build_attachment_output("chart.png", data, "image/png")
+    extra_text, image_blocks = build_attachment_output(
+        "chart.png", data, "image/png", authorized=True
+    )
 
     assert extra_text == ""
     assert len(image_blocks) == 1
@@ -131,7 +133,9 @@ def test_build_attachment_output_png_returns_image_block():
 def test_build_attachment_output_jpeg_normalises_jpg_mime():
     """'image/jpg' (non-standard) must be normalised to 'image/jpeg'."""
     data = b"\xff\xd8\xff"  # JPEG magic bytes
-    extra_text, image_blocks = build_attachment_output("photo.jpg", data, "image/jpg")
+    extra_text, image_blocks = build_attachment_output(
+        "photo.jpg", data, "image/jpg", authorized=True
+    )
 
     assert extra_text == ""
     assert image_blocks[0]["source"]["media_type"] == "image/jpeg"
@@ -139,7 +143,9 @@ def test_build_attachment_output_jpeg_normalises_jpg_mime():
 
 def test_build_attachment_output_image_no_content_type_infers_from_suffix():
     data = b"GIF89a"
-    extra_text, image_blocks = build_attachment_output("anim.gif", data, "")
+    extra_text, image_blocks = build_attachment_output(
+        "anim.gif", data, "", authorized=True
+    )
 
     assert extra_text == ""
     assert image_blocks[0]["source"]["media_type"] == "image/gif"
@@ -149,7 +155,7 @@ def test_build_attachment_output_image_no_content_type_infers_from_suffix():
 # build_attachment_output — text document routing
 # --------------------------------------------------------------------------- #
 
-def test_build_attachment_output_pdf_extracts_text_and_schedules_ingest():
+def test_build_attachment_output_pdf_extracts_text_and_schedules_ingest_when_authorized():
     extracted = "Quarterly revenue grew 23%."
     with (
         patch(
@@ -159,13 +165,36 @@ def test_build_attachment_output_pdf_extracts_text_and_schedules_ingest():
         patch("openexecutive.integrations.attachments._schedule_ingest") as mock_ingest,
     ):
         extra_text, image_blocks = build_attachment_output(
-            "report.pdf", b"%PDF-fake", "application/pdf"
+            "report.pdf", b"%PDF-fake", "application/pdf", authorized=True
         )
 
     assert image_blocks == []
     assert "[Attached: report.pdf]" in extra_text
     assert "Quarterly revenue grew 23%." in extra_text
     mock_ingest.assert_called_once()
+
+
+def test_build_attachment_output_pdf_extracts_text_but_skips_ingest_when_unauthorized():
+    """Regression test for issue #21: an unauthorized caller (e.g. Discord's
+    on_message before the roster check clears) still gets extracted text
+    back for its own throwaway reply, but MUST NOT trigger the shared
+    ChromaDB ingest — that's the actual security-relevant side effect."""
+    extracted = "Quarterly revenue grew 23%."
+    with (
+        patch(
+            "openexecutive.integrations.attachments._extract_text",
+            return_value=extracted,
+        ),
+        patch("openexecutive.integrations.attachments._schedule_ingest") as mock_ingest,
+    ):
+        extra_text, image_blocks = build_attachment_output(
+            "report.pdf", b"%PDF-fake", "application/pdf", authorized=False
+        )
+
+    assert image_blocks == []
+    assert "[Attached: report.pdf]" in extra_text
+    assert "Quarterly revenue grew 23%." in extra_text
+    mock_ingest.assert_not_called()
 
 
 def test_build_attachment_output_truncates_long_text():
@@ -178,7 +207,9 @@ def test_build_attachment_output_truncates_long_text():
         ),
         patch("openexecutive.integrations.attachments._schedule_ingest"),
     ):
-        extra_text, _ = build_attachment_output("doc.txt", b"...", "text/plain")
+        extra_text, _ = build_attachment_output(
+            "doc.txt", b"...", "text/plain", authorized=True
+        )
 
     assert "truncated" in extra_text.lower()
     # Total extra_text is label + capped text; must be much smaller than input.
@@ -190,7 +221,9 @@ def test_build_attachment_output_empty_extraction_returns_notice():
         "openexecutive.integrations.attachments._extract_text",
         return_value="   ",
     ):
-        extra_text, image_blocks = build_attachment_output("empty.pdf", b"", "application/pdf")
+        extra_text, image_blocks = build_attachment_output(
+            "empty.pdf", b"", "application/pdf", authorized=True
+        )
 
     assert image_blocks == []
     assert "could not extract" in extra_text.lower()
@@ -202,7 +235,7 @@ def test_build_attachment_output_empty_extraction_returns_notice():
 
 def test_build_attachment_output_unsupported_type_returns_notice():
     extra_text, image_blocks = build_attachment_output(
-        "model.xlsx", b"PK...", "application/vnd.ms-excel"
+        "model.xlsx", b"PK...", "application/vnd.ms-excel", authorized=True
     )
 
     assert image_blocks == []
@@ -224,7 +257,7 @@ async def test_process_attachments_skips_oversized_item():
             size=25 * 1024 * 1024,  # 25 MB > 20 MB limit
         )
     ]
-    extra_text, image_blocks = await process_attachments(items)
+    extra_text, image_blocks = await process_attachments(items, authorized=True)
 
     assert "too large" in extra_text.lower() or "skipped" in extra_text.lower()
     assert image_blocks == []
@@ -244,13 +277,41 @@ async def test_process_attachments_skips_failed_download_and_continues():
         return b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
 
     with patch("openexecutive.integrations.attachments.download_bytes", side_effect=_fake_download):
-        extra_text, image_blocks = await process_attachments(items)
+        extra_text, image_blocks = await process_attachments(items, authorized=True)
 
     # Item 1 failed — note in text
     assert "a.pdf" in extra_text
     # Item 2 succeeded — got an image block
     assert len(image_blocks) == 1
     assert image_blocks[0]["source"]["media_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_process_attachments_authorized_false_never_schedules_ingest():
+    """Regression test for issue #21: authorized=False must propagate to
+    EVERY item, not just the first — a multi-attachment message from an
+    unrostered Discord sender must not ingest any of its documents."""
+    items = [
+        AttachmentItem(url="https://example.com/a.txt", filename="a.txt", content_type="text/plain"),
+        AttachmentItem(url="https://example.com/b.pdf", filename="b.pdf", content_type="application/pdf"),
+    ]
+
+    async def _fake_download(url: str, headers=None, max_bytes=None):
+        return b"content from " + url.encode().split(b"/")[-1]
+
+    with (
+        patch("openexecutive.integrations.attachments.download_bytes", side_effect=_fake_download),
+        patch(
+            "openexecutive.integrations.attachments._extract_text",
+            side_effect=lambda data, filename: data.decode(),
+        ),
+        patch("openexecutive.integrations.attachments._schedule_ingest") as mock_ingest,
+    ):
+        extra_text, _ = await process_attachments(items, authorized=False)
+
+    assert "a.txt" in extra_text
+    assert "b.pdf" in extra_text
+    mock_ingest.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -271,7 +332,7 @@ async def test_process_attachments_concatenates_multiple_texts():
         ),
         patch("openexecutive.integrations.attachments._schedule_ingest"),
     ):
-        extra_text, image_blocks = await process_attachments(items)
+        extra_text, image_blocks = await process_attachments(items, authorized=True)
 
     assert "a.txt" in extra_text
     assert "b.txt" in extra_text

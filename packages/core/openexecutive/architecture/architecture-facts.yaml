@@ -2409,11 +2409,33 @@ integrations:
     extracted to Anthropic vision content blocks and forwarded to the
     Executive in the same turn as the text. Inbound documents
     (PDF/DOCX/TXT/MD/CSV) have their text extracted and inlined into the
-    user message AND are indexed into the ChromaDB ``company_docs``
-    collection in a fire-and-forget background task, so attachments
-    surface in future RAG retrieval. Per-file cap 20 MB; extracted text
-    truncated to 40 000 chars. Web chat exposes this through
-    ``POST /chat/upload`` (multipart) — capped at 5 files per turn.
+    user message AND, when the sender is authorized (see below), are
+    indexed into the ChromaDB ``company_docs`` collection in a
+    fire-and-forget background task, so attachments surface in future RAG
+    retrieval. Per-file cap 20 MB; extracted text truncated to 40 000
+    chars. Web chat exposes this through ``POST /chat/upload``
+    (multipart) — capped at 5 files per turn.
+
+    ``build_attachment_output()``/``process_attachments()`` take a
+    required ``authorized: bool`` (issue #21 — no default, so every call
+    site must consciously state it): gates ONLY the ChromaDB-ingest side
+    effect, not text-extraction/image-block building (those results are
+    only used for that turn's own reply and have no persistent shared
+    side effect, so gating them isn't a security requirement). Discord's
+    ``on_message`` resolves this via an early, silent
+    ``find_person_by_discord_id`` roster lookup BEFORE calling
+    ``process_attachments`` — separate from, and not a replacement for,
+    the AUDITED roster gate inside ``_handle_message`` (which still emits
+    the "integration_inbound" / "rejected_unknown_sender" audit rows).
+    Before this fix, attachment ingest ran unconditionally, 63 lines
+    before that audited gate could reject an unrostered sender — any
+    Discord user sharing a guild with the bot could DM it a document and
+    have its content permanently embedded into the shared knowledge base
+    with no visible feedback. Telegram and the web-chat upload route pass
+    ``authorized=True`` unconditionally: Telegram's roster check
+    (``telegram_webhook``) already gates the entire code path before
+    ``_process_and_reply`` is scheduled, and ``/chat/upload`` sits behind
+    the API's shared-secret middleware.
   broadcast_tools: |
     openexecutive.orchestrator.broadcast_tools — two new tools exposed
     to the Executive alongside the existing per-Person DM tools:
