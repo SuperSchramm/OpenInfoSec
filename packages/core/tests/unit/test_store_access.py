@@ -32,3 +32,50 @@ def test_get_shared_store_falls_back_to_construction_when_no_singleton(
     monkeypatch.setattr("openexecutive.knowledge.store.ChromaDBStore", lambda **_k: fresh)
 
     assert store_access.get_shared_store() is fresh
+
+
+# --------------------------------------------------------------------------- #
+# publish_swapped_store (issue #16)
+# --------------------------------------------------------------------------- #
+
+def test_publish_swapped_store_updates_both_app_state_and_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[Any] = []
+    monkeypatch.setattr(mcp_server, "set_store", captured.append)
+
+    class _AppState:
+        store = "stale"
+
+    app_state = _AppState()
+    new_store = object()
+
+    store_access.publish_swapped_store(app_state, new_store)
+
+    assert app_state.store is new_store
+    assert captured == [new_store]
+
+
+def test_publish_swapped_store_noop_when_app_state_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("publish_swapped_store() called set_store() with no app_state")
+
+    monkeypatch.setattr(mcp_server, "set_store", boom)
+
+    store_access.publish_swapped_store(None, object())  # must not raise
+
+
+def test_publish_swapped_store_noop_when_app_state_has_no_store_attr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("publish_swapped_store() called set_store() with no store attr")
+
+    monkeypatch.setattr(mcp_server, "set_store", boom)
+
+    class _BareAppState:
+        pass
+
+    store_access.publish_swapped_store(_BareAppState(), object())  # must not raise

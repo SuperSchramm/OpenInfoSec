@@ -652,8 +652,15 @@ async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
             except Exception:
                 logger.exception("client-slots: reindex skill failed")
 
+    # Guarded here (rather than inside the helper) so a switch with no
+    # app_state skips constructing a second ChromaDBStore that nothing
+    # would use.
     if app_state is not None and hasattr(app_state, "store"):
-        app_state.store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        from openexecutive.orchestrator.store_access import publish_swapped_store
+
+        publish_swapped_store(
+            app_state, ChromaDBStore(persist_directory=settings.vector_store_path)
+        )
     return docs_indexed
 
 

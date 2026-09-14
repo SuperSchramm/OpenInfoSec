@@ -2608,6 +2608,10 @@ integrations:
         people.list_people, departments.list_departments, episodic list_*); no
         LLM calls. The warm ChromaDB store is handed to handlers via
         mcp_server.set_store() from the lifespan (handlers have no Request).
+        This singleton is also refreshed by every destructive-op store swap
+        (fixture load/unload, factory reset, client-slot switch) — issue #16
+        closed a gap where those 4 swap sites replaced app.state.store but
+        left the mcp_server singleton pointing at the pre-swap store.
       Tools: consult_specialist (flagship — orchestrator.router.route_to_specialist,
         stateless, the specialist enum is a Literal pinned to SPECIALIST_REGISTRY
         by a unit test — includes `talent`, so the executive-search specialist's

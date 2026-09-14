@@ -11,21 +11,18 @@ are fine).
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openexecutive.knowledge.store import ChromaDBStore
 
 
 def get_shared_store() -> ChromaDBStore:
-    """Return the process-wide store set once in ``api/main.py``'s lifespan
-    (the same object ``app.state.store`` was initialized to -- NOT
-    necessarily the object it holds *now*: a few routes deliberately swap
-    ``app.state.store`` for a fresh instance after a destructive vector-store
-    operation, e.g. fixture load/reset or a client-slot switch, without
-    updating this singleton; see issue #13's follow-up on swap-safety),
-    falling back to a fresh construction when it isn't set (e.g. a unit test
-    that never ran the FastAPI lifespan).
+    """Return the process-wide store: the object set once in ``api/main.py``'s
+    lifespan, or the most recent object published via ``publish_swapped_store``
+    below (fixture load/unload/reset, a client-slot switch -- see issue #16),
+    falling back to a fresh construction when neither has run (e.g. a unit
+    test that never ran the FastAPI lifespan).
 
     Imports stay deferred (function-local) so a test's
     ``monkeypatch.setattr(knowledge_store, "ChromaDBStore", ...)`` still
@@ -42,3 +39,24 @@ def get_shared_store() -> ChromaDBStore:
     if shared is not None:
         return shared
     return ChromaDBStore(persist_directory=get_settings().vector_store_path)
+
+
+def publish_swapped_store(app_state: Any | None, new_store: ChromaDBStore) -> None:
+    """Publish a freshly-constructed store after a destructive vector-store
+    operation (fixture load/unload/reset, a client-slot switch): sets it on
+    ``app_state.store`` AND refreshes the ``mcp_server`` singleton
+    ``get_shared_store()`` reads for tool handlers with no Request/app access.
+
+    Before issue #16, each of the 4 swap sites updated only ``app_state.store``
+    directly -- the singleton kept pointing at the pre-swap store indefinitely.
+
+    No-ops if ``app_state`` is ``None`` or has no ``store`` attribute yet
+    (matches each call site's pre-existing guard -- a bare CLI/eval process
+    with no FastAPI ``app.state`` has nothing to publish to).
+    """
+    if app_state is None or not hasattr(app_state, "store"):
+        return
+    from openexecutive.mcp_server import server as mcp_server
+
+    app_state.store = new_store
+    mcp_server.set_store(new_store)

@@ -100,13 +100,16 @@ async def fixtures_unload(request: Request) -> dict:
     except FixtureNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    # Mirror the load route: replace the shared store so subsequent requests
-    # see the freshly-rebuilt company_docs collection.
+    # Mirror the load route: replace the shared store (and the mcp_server
+    # singleton alongside it — issue #16) so subsequent requests and tool
+    # handlers alike see the freshly-rebuilt company_docs collection.
     if hasattr(request.app.state, "store"):
         from openexecutive.knowledge.store import ChromaDBStore
+        from openexecutive.orchestrator.store_access import publish_swapped_store
 
-        request.app.state.store = ChromaDBStore(
-            persist_directory=settings.vector_store_path
+        publish_swapped_store(
+            request.app.state,
+            ChromaDBStore(persist_directory=settings.vector_store_path),
         )
 
     return result
@@ -132,12 +135,16 @@ async def load_fixture(name: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # If the app has a shared store in state, replace it with a fresh instance
-    # so the new company_docs collection is visible to subsequent requests.
+    # (and refresh the mcp_server singleton alongside it — issue #16) so the
+    # new company_docs collection is visible to subsequent requests and tool
+    # handlers alike.
     if hasattr(request.app.state, "store"):
         from openexecutive.knowledge.store import ChromaDBStore
+        from openexecutive.orchestrator.store_access import publish_swapped_store
 
-        request.app.state.store = ChromaDBStore(
-            persist_directory=settings.vector_store_path
+        publish_swapped_store(
+            request.app.state,
+            ChromaDBStore(persist_directory=settings.vector_store_path),
         )
 
     return result

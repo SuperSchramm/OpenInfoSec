@@ -93,7 +93,13 @@ _active_store: Any = None
 
 
 def set_store(store: Any) -> None:
-    """Hand the API's warm ChromaDB store to MCP handlers (called from lifespan)."""
+    """Hand the API's warm ChromaDB store to MCP handlers.
+
+    Called once from the lifespan at boot, and again by
+    ``orchestrator.store_access.publish_swapped_store`` any time a
+    destructive vector-store operation swaps in a fresh store (fixture
+    load/unload/reset, a client-slot switch -- see issue #16).
+    """
     global _active_store
     _active_store = store
 

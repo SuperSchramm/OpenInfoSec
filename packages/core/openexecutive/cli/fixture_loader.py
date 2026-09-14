@@ -811,12 +811,17 @@ async def reset_all_state(
         except Exception:
             logger.exception("reset: clearing active-client sentinel failed")
 
-        # 7. Swap the shared store inside the lock to close the race where a
-        # concurrent reader could otherwise see the deleted/recreated
-        # collection through the previous store instance.
+        # 7. Swap the shared store (and the mcp_server singleton alongside it
+        # — issue #16) inside the lock to close the race where a concurrent
+        # reader could otherwise see the deleted/recreated collection through
+        # the previous store instance. Guarded here (rather than inside the
+        # helper) so a bare CLI reset with no app_state skips constructing a
+        # ChromaDBStore — and its embedding model — that nothing would use.
         if app_state is not None and hasattr(app_state, "store"):
-            app_state.store = ChromaDBStore(
-                persist_directory=settings.vector_store_path
+            from openexecutive.orchestrator.store_access import publish_swapped_store
+
+            publish_swapped_store(
+                app_state, ChromaDBStore(persist_directory=settings.vector_store_path)
             )
 
         return {
