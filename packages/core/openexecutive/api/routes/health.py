@@ -2,7 +2,7 @@ import asyncio
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from openexecutive.api.models import HealthResponse
 
@@ -10,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
+async def health_check(request: Request) -> HealthResponse:
     from openexecutive.config import get_settings
     from openexecutive.knowledge.skills_index import count_skills
     from openexecutive.knowledge.store import ChromaDBStore
@@ -21,7 +21,11 @@ async def health_check() -> HealthResponse:
     builtin_skills_count = 0
     company_skills_count = 0
     try:
-        store = ChromaDBStore(persist_directory=settings.vector_store_path)
+        store = (
+            request.app.state.store
+            if hasattr(request.app.state, "store")
+            else ChromaDBStore(persist_directory=settings.vector_store_path)
+        )
         chunk_count = store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION)
         builtin_skills_count = count_skills(store, source="builtin")
         company_skills_count = count_skills(store, source="company")

@@ -121,8 +121,7 @@ async def _fire_post_onboarding_research(session_id: str) -> None:
     run_id = str(uuid.uuid4())
     last_error = ""
     try:
-        from openexecutive.config import get_settings
-        from openexecutive.knowledge.store import ChromaDBStore
+        from openexecutive.orchestrator.store_access import get_shared_store as _get_store
         from openexecutive.workflows import WORKFLOW_REGISTRY
 
         workflow = WORKFLOW_REGISTRY["executive_research"]
@@ -139,7 +138,7 @@ async def _fire_post_onboarding_research(session_id: str) -> None:
         except Exception:
             logger.exception("post-onboarding research: create_run failed")
 
-        store = ChromaDBStore(persist_directory=get_settings().vector_store_path)
+        store = _get_store()
         artifact = ""
 
         async def _run() -> str:
