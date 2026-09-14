@@ -17,7 +17,7 @@ Before assessing a finding, confirm or ask for:
 2. **What evidence exists today** — documentation, test results, logs, attestations — versus what's missing
 3. **Whether the underlying capability actually exists**, even if undocumented or untested (an unwritten process still running is a different problem than a process that doesn't exist)
 4. **Who owns the system or process the finding touches** — GRC assesses, it doesn't remediate alone
-5. **Any related findings from other frameworks or prior audits** — a gap rarely exists in isolation; check `regulated_industry_control_overlap.md`-style cross-framework mapping before treating this as a single-framework issue
+5. **Any related findings from other frameworks or prior audits** — a gap rarely exists in isolation; check whether other frameworks' language maps to the same underlying control before treating this as a single-framework issue
 
 ## The assessment sequence
 
