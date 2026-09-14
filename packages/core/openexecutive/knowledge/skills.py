@@ -38,6 +38,39 @@ class SkillParseError(ValueError):
 
 
 class SkillFrontmatter(BaseModel):
+    """`description` + `when_to_use` are the ENTIRE search corpus for this
+    skill (`skills_index._skill_doc_text()` embeds `name + description +
+    when_to_use` — never the body). A body section covering a specific
+    technique, scenario, or taxonomy that isn't named here is invisible to
+    semantic search: a query about exactly that topic can miss the skill
+    entirely, even while a human skimming the body would call it an obvious
+    match (issue #14, #20 — 7 of 10 files in one directory shipped with this
+    gap, several needing 2-4 rounds of live-index testing to actually clear
+    it, because read-through review alone did not catch it).
+
+    A compliant `description`/`when_to_use` pair:
+
+    1. Names the specific triggering scenario(s), not just the abstract
+       purpose. "GRC says compliant, CyberOps says it doesn't work — whose
+       call?" beats "determine whether a question is its own to answer."
+    2. Names any specific technique, formula, taxonomy, or rubric the body
+       uses, verbatim or close to it — SLE/ARO/ALE, a named framework
+       (NIST CSF, MITRE ATT&CK), a specific taxonomy the body defines — not
+       just a paraphrase like "quantify risk" or "assess an incident."
+    3. Gets tested against the real embedding index before merging, with
+       MORE than one query, not just read-through-reviewed. Read-through
+       alone both misses real gaps (a well-written paragraph can still fail
+       to clear `settings.knowledge_distance_threshold` on the exact query
+       it's meant to answer) and produces false positives (a file that
+       reads like it needs work can already clear it with room to spare).
+       Testing only the one query motivating the edit isn't enough either —
+       a rewrite chasing that query's distance down can silently push
+       OTHER, previously-passing queries over the threshold (#20's fix hit
+       this itself: fixing the target query broke five that used to work).
+       See `.github/CONTRIBUTING.md` → "Writing a Skill" for the test
+       snippet to run.
+    """
+
     name: str
     description: str
     when_to_use: str

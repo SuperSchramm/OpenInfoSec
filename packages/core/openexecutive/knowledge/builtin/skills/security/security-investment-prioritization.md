@@ -1,7 +1,7 @@
 ---
 name: security-investment-prioritization
-description: Build a risk-quantified budget justification for a security capability purchase or strategic hire
-when_to_use: The CISO specialist needs to justify security spend, build a business case for a new control or capability, or respond to a budget challenge
+description: Build a risk-quantified budget justification for a security capability purchase, platform, or strategic hire -- e.g. justifying a new EDR platform against a red-team or pen-test finding -- using a NIST CSF maturity baseline and the ΔRisk = Current ALE − Residual ALE formula
+when_to_use: The CISO specialist needs to justify security spend, build a business case for a new control, platform, or capability, or respond to a budget challenge -- including when a red-team finding, pen-test result, or audit gap is the trigger and the ask must name a specific tool, not a category
 category: security
 ---
 

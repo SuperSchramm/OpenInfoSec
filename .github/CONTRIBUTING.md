@@ -43,6 +43,81 @@ Requirements:
 - Domain-tagged with the correct folder
 - Practical, not academic — this is for practitioners
 
+## Writing a Skill
+
+Skills (`knowledge/builtin/skills/<category>/*.md`) are a different authoring
+surface from plain knowledge docs above: they're found by semantic search
+over their YAML frontmatter, not their body. `description` and `when_to_use`
+are the **entire search corpus** — `skills_index._skill_doc_text()` embeds
+`name + description + when_to_use` and nothing else. A body section covering
+a specific technique or scenario that isn't named in the frontmatter is
+invisible to search, no matter how well-written the body is.
+
+This bit contributors before (issue #14, #20 — 7 of 10 files in one
+directory shipped with this exact gap). A compliant `description`/
+`when_to_use` pair:
+
+1. **Names the specific triggering scenario(s)**, not just the abstract
+   purpose — "GRC says compliant, CyberOps says it doesn't work — whose
+   call?" beats "determine whether a question is its own to answer."
+2. **Names any specific technique, formula, taxonomy, or rubric the body
+   uses**, verbatim or close to it — `SLE/ARO/ALE`, a named framework
+   (`NIST CSF`, `MITRE ATT&CK`), a specific taxonomy the body defines — not
+   a paraphrase like "quantify risk" or "assess an incident."
+3. **Gets tested against the real embedding index before merging, with
+   MORE than one query.** Read-through review alone isn't enough — it both
+   misses real gaps (a well-written paragraph can still fail to clear the
+   relevance threshold on the exact query it's meant to answer) and
+   produces false positives (a file that reads like it needs work may
+   already clear threshold with room to spare). And testing only the one
+   query you're trying to fix isn't enough either — a rewrite chasing one
+   query's distance number down can silently push OTHER, previously-passing
+   queries over the threshold (this happened during #20's own fix: fixing
+   the target query broke five queries that used to work). Test a handful
+   of realistic phrasings, not just the one that prompted the change.
+
+To test, run real queries against the real index (adjust `queries` and
+`category_filter` to your skill, run from `packages/core`):
+
+```python
+import tempfile
+from openexecutive.knowledge.skills_index import index_skill, search_skills
+from openexecutive.knowledge.skills_repo import list_skills
+from openexecutive.knowledge.store import ChromaDBStore
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = ChromaDBStore(persist_directory=tmp)
+    for skill in list_skills():
+        if skill.source == "builtin":  # matches real competition, skip local company fixtures
+            index_skill(skill, store)
+
+    queries = [
+        "a real question a user would actually ask",
+        "a second, differently-phrased question the skill should also catch",
+    ]
+    for query in queries:
+        hits = search_skills(query, store, n_results=5, category_filter="security")
+        print(f"\n{query!r}")
+        for h in hits:
+            print(f"  {h['name']:40s} distance={h['distance']:.4f}")
+```
+
+(Needs `ANTHROPIC_API_KEY` and `EXEC_EMAIL_ADDRESS` set to any value —
+`Settings()` requires them but this script never calls the API. Nothing
+here is async — `index_skill`/`search_skills`/`list_skills` are all
+synchronous, no event loop needed.)
+
+Your skill should rank #1 for each of its trigger queries, with a
+comfortable margin under `settings.knowledge_distance_threshold`
+(`openexecutive/config.py`, default `0.55`, overridable via
+`KNOWLEDGE_DISTANCE_THRESHOLD` — this is the threshold `retrieve_skills()`
+actually gates on; don't confuse it with the separate `_DISTANCE_THRESHOLD`
+constant in `retriever.py`, which governs the unrelated `retrieve()` path)
+— not just barely clearing it. If a query doesn't clear it, or clearing it
+pushed another query over, the frontmatter needs a term from the body that
+query actually matches on, not a longer paraphrase of what's already
+there.
+
 ## Architecture Docs (`/architecture` page)
 
 The `/architecture` page in the UI is served from **static, hand-authored

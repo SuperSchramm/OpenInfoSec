@@ -1,7 +1,7 @@
 ---
 name: incident-escalation-framework
-description: Determine when a security incident must escalate from SecOps to CISO to executive/board/regulatory level
-when_to_use: A security incident is active or just contained, and the CISO or CyberOps specialist needs to decide who needs to know and how urgently
+description: Determine when a security incident must escalate from SecOps to CISO to executive/board/regulatory level, using a four-level trigger framework and a statutory notification-clock and legal-privilege lens for the top two levels
+when_to_use: A security incident is active or just contained and the CISO or CyberOps specialist needs to decide who needs to know and how urgently -- especially when the incident might touch regulated data (PHI, PII, cardholder data) and could start a statutory breach-notification clock, or when General Counsel and legal privilege protocols need to enter the picture
 category: security
 ---
 
