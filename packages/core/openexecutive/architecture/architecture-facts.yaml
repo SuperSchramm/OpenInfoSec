@@ -590,12 +590,14 @@ knowledge:
         fan-out alongside retrieve()/retrieve_failures() — gated by
         skills_index.skills_active_for(), which checks whether that
         specialist's BaseAgent.domain (NOT domain_aliases_source below) has
-        any populated skill content. The two gates diverge for several
-        specialists (grc's DOMAIN_ALIASES is ["governance","compliance"],
-        never "security", though GRCAgent.domain=="security" and that's
-        where its skill content lives — see issue #12) — retrieve_skills()
-        must key off agent.domain or grc silently loses its own content, as
-        it originally did before this was caught. Path 2 is live today only
+        any populated skill content. This gate deliberately keys off
+        agent.domain rather than DOMAIN_ALIASES — grc's DOMAIN_ALIASES once
+        omitted "security" (GRCAgent.domain, where its skill content
+        actually lives) even though its skills gate never depended on that
+        table; issue #12 fixed DOMAIN_ALIASES itself once this divergence
+        was audited (see domain_aliases_caveat below), but this gate would
+        have kept working correctly either way, which is why it's built
+        this way rather than off the alias table. Path 2 is live today only
         for category=security (ciso/cyberops/grc); inert for every other
         specialist until someone authors consult-style skill content in
         their domain. A source=="company" hit's body/description/when_to_use
@@ -612,10 +614,21 @@ knowledge:
   domain_aliases_caveat: |
     DOMAIN_ALIASES (used by retrieve()/retrieve_failures()) and
     BaseAgent.domain (the class attribute, used by skills_active_for() and
-    elsewhere) are two independently-maintained mappings that already
-    disagree for several specialists — confirmed for grc and talent (zero
-    overlap) and ciso/cpo/board_comms (partial overlap, one has an extra
-    alias domain the other lacks). Tracked in issue #12; not yet reconciled.
+    elsewhere) are two independently-maintained mappings, kept deliberately
+    separate rather than collapsed into one: cpo/ciso/board_comms each
+    intentionally alias in an EXTRA domain beyond their own (cpo also pulls
+    strategy, ciso also pulls governance, board_comms also pulls finance),
+    which a single agent.domain lookup can't express. Issue #12 audited all
+    13 SPECIALIST_REGISTRY entries and fixed the one real bug this
+    divergence allowed: grc's entry omitted "security" (GRCAgent's own
+    domain), silently excluding grc from that entire knowledge subtree.
+    Every DOMAIN_ALIASES entry now includes its own specialist's
+    agent.domain, enforced by a parametrized regression test
+    (test_domain_aliases_entry_includes_own_agent_domain in
+    tests/unit/test_retrieve_skills.py) covering all 12 DOMAIN_ALIASES
+    entries (triage is correctly absent -- not consultable, never reaches
+    this table) plus a completeness check that every
+    consult_specialist-reachable specialist has an entry at all.
   dedupe_note: Multi-domain chunks can fan out to multiple rows; the retriever dedupes by text before returning.
 
 memory:

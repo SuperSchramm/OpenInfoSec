@@ -147,6 +147,18 @@ def _emit_retrieval_audit(
     )
 
 
+# Per-specialist knowledge-domain scope for retrieve()/retrieve_failures().
+# Most specialists map 1:1 to their own `BaseAgent.domain` (retriever.py has
+# no direct import of the agent registry to check this against at runtime --
+# see test_domain_aliases_entry_includes_own_agent_domain in
+# tests/unit/test_retrieve_skills.py for the enforced invariant). A few
+# specialists deliberately see MORE than their own domain (cpo also pulls
+# strategy content, ciso also pulls governance, board_comms also pulls
+# finance) -- that's intentional breadth, not drift, which is why this table
+# exists instead of every specialist just using its own `agent.domain`
+# directly. Every entry must still include its own specialist's domain,
+# though (issue #12: grc's list omitted "security", GRCAgent's own domain,
+# silently excluding it from that entire knowledge subtree).
 DOMAIN_ALIASES: dict[str, list[str]] = {
     "cso": ["strategy"],
     "cfo": ["finance"],
@@ -157,11 +169,22 @@ DOMAIN_ALIASES: dict[str, list[str]] = {
     "cpo": ["product", "strategy"],
     "ciso": ["security", "governance"],
     "cyberops": ["security"],
-    "grc": ["governance", "compliance"],
+    # issue #12: must include "security" (GRCAgent.domain) -- without it,
+    # grc's retrieve()/retrieve_failures() calls were silently excluded from
+    # every knowledge/builtin/security/ file (NIST CSF, MITRE ATT&CK, and
+    # regulated_industry_control_overlap.md, which grc's own
+    # compliance-gap-risk-assessment.md skill references by name).
+    "grc": ["security", "governance", "compliance"],
     "board_comms": ["board", "finance"],
     # The talent specialist reuses the existing HR + strategy knowledge
     # domains until a dedicated `talent` knowledge corpus is seeded (Phase 2).
-    "talent": ["hr", "strategy"],
+    # "talent" is included too for COMPANY-collection uploads (the
+    # /documents endpoint accepts an arbitrary domain form field today, so a
+    # doc tagged "talent" is already reachable) -- NOT yet for BUILTIN:
+    # loader.DOMAIN_MAP has no "talent" key, so a future
+    # knowledge/builtin/talent/ directory would need that map updated too
+    # before ingest would even tag its files this way.
+    "talent": ["talent", "hr", "strategy"],
 }
 
 

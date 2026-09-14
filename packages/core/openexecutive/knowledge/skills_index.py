@@ -173,11 +173,13 @@ def skills_active_for(specialist_name: str, store: ChromaDBStore) -> bool:
     The single shared gate for the specialist-consult skills path — call
     this everywhere that decision needs to be made rather than re-deriving
     it. Keys off `BaseAgent.domain` (the class attribute), NOT
-    `retriever.DOMAIN_ALIASES` — those two mappings disagree for several
-    specialists (issue #12): `grc`'s alias list is `["governance",
-    "compliance"]` and never contains `"security"`, even though
-    `GRCAgent.domain == "security"` and that's where its skill content
-    actually lives. Using `DOMAIN_ALIASES` here would silently exclude it.
+    `retriever.DOMAIN_ALIASES` — the two mappings are independently
+    maintained and once disagreed for `grc` (issue #12: its alias list
+    omitted `"security"`, `GRCAgent.domain`, even though that's where its
+    skill content actually lives). #12 fixed that specific entry, but this
+    gate stays keyed off `agent.domain` regardless — it's the value that's
+    always correct for "does this specialist's own domain have skill
+    content," never a proxy for it.
 
     No caching (benchmarked: an unfiltered full-collection fetch ran
     p50=1.24ms/p95=1.58ms over ~25 docs — negligible next to a

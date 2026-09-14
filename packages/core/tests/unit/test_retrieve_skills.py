@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from openexecutive.knowledge import skills_index, skills_repo
-from openexecutive.knowledge.retriever import retrieve_skills
+from openexecutive.knowledge.retriever import DOMAIN_ALIASES, retrieve_skills
 from openexecutive.knowledge.skills_index import search_skills, skills_active_for
 from openexecutive.knowledge.skills_repo import create_skill
 from openexecutive.knowledge.store import ChromaDBStore
+from openexecutive.orchestrator.router import SPECIALIST_REGISTRY
 
 
 @pytest.fixture()
@@ -77,11 +78,13 @@ def test_skills_active_for_false_for_unknown_specialist(isolated: ChromaDBStore)
 def test_skills_active_for_keys_off_agent_domain_not_domain_aliases(isolated: ChromaDBStore) -> None:
     """Regression guard for the grc DOMAIN_ALIASES divergence (see issue #12).
 
-    grc.DOMAIN_ALIASES entry is ["governance", "compliance"] and never
-    contains "security", even though GRCAgent.domain == "security". If this
-    gate ever gets rewired to key off DOMAIN_ALIASES instead of agent.domain,
-    grc would silently stop seeing its own skill content -- this test exists
-    to catch that regression.
+    grc.DOMAIN_ALIASES now correctly includes "security" (fixed alongside
+    this issue's audit of all 13 SPECIALIST_REGISTRY entries), but this gate
+    was deliberately built to key off agent.domain directly rather than
+    DOMAIN_ALIASES in the first place -- this test guards against a future
+    rewrite reintroducing that indirection (and the class of bug it already
+    caused once: a stale/incomplete alias entry silently excluding a
+    specialist from its own content).
     """
     create_skill(
         name="a-security-skill",
@@ -438,3 +441,53 @@ def test_retrieve_skills_fails_closed_when_search_skills_raises(
 
     result = retrieve_skills("a query about security", specialist_name="ciso", store=isolated)
     assert result == ""
+
+
+# --------------------------------------------------------------------------- #
+# DOMAIN_ALIASES vs agent.domain invariant (issue #12)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("specialist_name", sorted(DOMAIN_ALIASES))
+def test_domain_aliases_entry_includes_own_agent_domain(specialist_name: str) -> None:
+    """Every DOMAIN_ALIASES entry must include its own specialist's
+    agent.domain, or that specialist is silently excluded from its own
+    knowledge subtree -- exactly what happened to grc (#12): its entry was
+    ["governance", "compliance"], never "security" (GRCAgent.domain), so
+    every knowledge/builtin/security/ file was invisible to grc's
+    retrieve()/retrieve_failures() calls, including a file its own skill
+    references by name.
+
+    A specialist MAY alias in additional domains beyond its own (cpo also
+    pulls strategy, ciso also pulls governance, board_comms also pulls
+    finance) -- that's intentional breadth. What it may never do is omit
+    its own domain.
+    """
+    agent = SPECIALIST_REGISTRY.get(specialist_name)
+    assert agent is not None, (
+        f"{specialist_name!r} is in DOMAIN_ALIASES but not SPECIALIST_REGISTRY "
+        "-- stale entry?"
+    )
+    assert agent.domain in DOMAIN_ALIASES[specialist_name], (
+        f"DOMAIN_ALIASES[{specialist_name!r}] = {DOMAIN_ALIASES[specialist_name]!r} "
+        f"does not include its own agent.domain {agent.domain!r} -- this "
+        f"specialist is silently excluded from its own knowledge subtree."
+    )
+
+
+def test_every_consultable_specialist_has_a_domain_aliases_entry() -> None:
+    """Every specialist reachable via consult_specialist should have a
+    DOMAIN_ALIASES entry -- one silently missing (as grc's correctness would
+    have been, had it simply been dropped rather than misconfigured) means
+    that specialist's retrieve() calls fall through to an unfiltered
+    all-domains search rather than its own domain, which is broader than
+    intended rather than narrower, but still worth catching deliberately
+    rather than by accident.
+
+    triage is the one specialist correctly absent: it's excluded from
+    CHAT_CONSULTABLE_SPECIALISTS entirely and never reaches retrieve() with
+    its own specialist_name.
+    """
+    from openexecutive.orchestrator.router import CHAT_CONSULTABLE_SPECIALISTS
+
+    missing = sorted(CHAT_CONSULTABLE_SPECIALISTS - DOMAIN_ALIASES.keys())
+    assert missing == [], f"specialists missing a DOMAIN_ALIASES entry: {missing}"
