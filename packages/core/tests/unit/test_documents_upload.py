@@ -19,11 +19,17 @@ from openexecutive.api.routes import documents
 
 
 class _CapturingStore:
-    """Records the metadata passed to add_documents so the test can assert
-    the domain tag without standing up a real ChromaDB / embedding model."""
+    """Realistic-enough in-memory ChromaDB double: upsert-by-id and
+    delete-by-metadata-filter, so tests can assert actual overwrite/delete
+    behavior (`self.documents`, current live state) rather than only the
+    arguments a single call received. `added`/`added_ids` stay as an
+    append-only call history for tests that just want "was this ever
+    added with domain=X", independent of later overwrites."""
 
     def __init__(self) -> None:
+        self.documents: dict[str, dict[str, Any]] = {}
         self.added: list[dict[str, Any]] = []
+        self.added_ids: list[str] = []
 
     def add_documents(
         self,
@@ -33,6 +39,17 @@ class _CapturingStore:
         collection: str,
     ) -> None:
         self.added.extend(metadatas)
+        self.added_ids.extend(ids)
+        for text, meta, doc_id in zip(texts, metadatas, ids, strict=False):
+            self.documents[doc_id] = {"text": text, "metadata": meta}
+
+    def delete_documents(self, collection: str, where: dict[str, Any]) -> None:
+        for doc_id in [
+            doc_id
+            for doc_id, doc in self.documents.items()
+            if all(doc["metadata"].get(k) == v for k, v in where.items())
+        ]:
+            del self.documents[doc_id]
 
 
 @pytest.fixture
@@ -51,8 +68,14 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app)
 
 
-def _upload(client: TestClient, **data: str) -> Any:
-    files = {"file": ("plan.md", io.BytesIO(b"# Plan\nGrow revenue 30%."), "text/markdown")}
+def _upload(
+    client: TestClient,
+    *,
+    filename: str = "plan.md",
+    content: bytes = b"# Plan\nGrow revenue 30%.",
+    **data: str,
+) -> Any:
+    files = {"file": (filename, io.BytesIO(content), "text/markdown")}
     return client.post("/documents", files=files, data=data)
 
 
@@ -87,6 +110,65 @@ def test_get_document_returns_extracted_text(client: TestClient) -> None:
     body = resp.json()
     assert body["filename"] == "plan.md"
     assert "Grow revenue 30%." in body["content"]
+
+
+def test_indexed_chunk_metadata_uses_real_filename_not_temp_path(
+    client: TestClient,
+) -> None:
+    """Regression test for issue #22: chunk metadata must point at the
+    real uploaded filename, not the throwaway tempfile.NamedTemporaryFile
+    path ingest_file reads from (which is deleted before this handler even
+    returns)."""
+    assert _upload(client).status_code == 200
+
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    assert store.added, "expected at least one indexed chunk"
+    for meta in store.added:
+        assert meta["filename"] == "plan.md"
+        assert meta["source"] == "plan.md"
+        assert "tmp" not in meta["source"].lower()
+
+
+def test_reuploading_same_file_overwrites_via_explicit_delete_not_stable_ids(
+    client: TestClient,
+) -> None:
+    """issue #22: chunk ids are derived ONLY from the unique per-request
+    temp path — never from the uploaded filename. An earlier fix attempt
+    got re-upload-overwrites by deriving chunk ids from display_name
+    instead, but adversarial security review found that made display_name
+    (attacker-influenced on some upload paths) a shared collision key: two
+    unrelated uploads sharing a filename could upsert over each other's
+    chunks and destroy content across trust boundaries. This route gets
+    overwrite-on-reupload back a different way instead: an explicit
+    delete-by-filename immediately before ingest (safe here specifically
+    because this route sits behind the app-wide shared-secret auth gate,
+    unlike the attachment ingest path) rather than relying on colliding
+    chunk ids. This test confirms both halves: the ids themselves never
+    collide (proving the risky mechanism didn't come back), and the live
+    store still ends up holding only the latest upload's chunks (proving
+    the explicit delete is doing the overwrite job instead)."""
+    assert _upload(client).status_code == 200
+    store: _CapturingStore = client.app.state.store  # type: ignore[attr-defined]
+    first_ids = sorted(store.added_ids)
+    assert first_ids, "expected at least one indexed chunk"
+
+    store.added_ids.clear()
+    store.added.clear()
+    assert _upload(client).status_code == 200
+    second_ids = sorted(store.added_ids)
+
+    assert set(second_ids).isdisjoint(first_ids), (
+        "re-uploading the identical file produced the SAME chunk ids as "
+        "the first upload -- that would mean chunk ids are keyed off "
+        "filename/display_name again, reintroducing the cross-upload "
+        "collision issue #22's final fix deliberately removed"
+    )
+    assert set(store.documents.keys()) == set(second_ids), (
+        "expected the route's explicit delete-before-ingest to leave only "
+        "the second upload's chunks live -- the first upload's chunks "
+        "should have been cleared, not left to accumulate alongside the "
+        "new set"
+    )
 
 
 def test_get_document_missing_returns_404(client: TestClient) -> None:

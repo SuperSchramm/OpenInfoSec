@@ -167,7 +167,25 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
                 tmp_path = Path(tmp.name)
 
             try:
-                count = await ingest_file(tmp_path, store, domain="company_docs")
+                # display_name (issue #22): the real uploaded filename, not
+                # the throwaway temp path — keeps filename/source metadata
+                # pointing at something meaningful instead of a path that's
+                # deleted right after this call. Does NOT make chunk ids
+                # stable across re-uploads (see ingest_file's docstring) — a
+                # namespace-based dedup scheme was tried and rejected during
+                # this fix's own adversarial review: it let a same-named
+                # attachment silently destroy a curated /documents upload
+                # (or another user's attachment), which is worse than the
+                # duplicate-accumulation this was meant to fix. Unlike the
+                # /documents route, there is deliberately no delete-before-
+                # ingest here — this sender isn't behind the same auth gate,
+                # so a filename-keyed delete would just be the collision bug
+                # again. Known gaps this leaves (no purge path, no isolation
+                # from curated-doc trust) are tracked in issue #25, not fixed
+                # here.
+                count = await ingest_file(
+                    tmp_path, store, domain="company_docs", display_name=filename
+                )
                 logger.info(
                     "attachments: indexed %d chunks from %s into ChromaDB",
                     count,

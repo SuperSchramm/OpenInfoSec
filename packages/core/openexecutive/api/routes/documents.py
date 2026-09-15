@@ -57,11 +57,31 @@ async def upload_document(
             else ChromaDBStore(persist_directory=settings.vector_store_path)
         )
 
+        # display_name (issue #22): tmp_path is a throwaway temp file deleted
+        # at the end of this handler — display_name makes chunk metadata
+        # (filename/source) point at safe_filename instead, so the indexed
+        # chunks are attributable after tmp_path is gone. It does NOT make
+        # chunk ids stable (ingest_file derives those from tmp_path, which is
+        # unique per request) — an earlier version of this fix did, and two
+        # rounds of adversarial security review found that let any two
+        # uploads sharing a filename silently overwrite each other's chunks,
+        # including across trust boundaries. So a re-upload here would
+        # normally just accumulate a second chunk set for the same
+        # safe_filename instead of replacing the first. This route is the
+        # one caller where that's worth closing: it sits behind the
+        # app-wide BACKEND_SHARED_SECRET middleware (see api/main.py), so
+        # the filename is admin-supplied, not attacker-influenced the way an
+        # unrostered attachment sender's filename would be — clearing the
+        # old chunk set first is safe here without reopening that hole.
+        store.delete_documents(
+            collection=ChromaDBStore.COMPANY_COLLECTION, where={"filename": safe_filename}
+        )
         chunks_indexed = await ingest_file(
             path=tmp_path,
             store=store,
             domain=domain,
             collection=ChromaDBStore.COMPANY_COLLECTION,
+            display_name=safe_filename,
         )
 
         company_docs_dir = settings.company_profile_path.parent / "docs"

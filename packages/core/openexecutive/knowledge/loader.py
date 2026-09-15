@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -128,12 +130,94 @@ def infer_domain_from_path(path: Path) -> str:
     return "general"
 
 
+# Strips control characters (C0 + C1 ranges, covering \r\n\t\x0b\x0c and the
+# less-obvious \x1b ESC / \x85 NEL), the Unicode line/paragraph separators
+# models routinely treat as newlines, and the [ ] brackets that delimit
+# retriever.py's `[filename] chunk text` citation format. Deliberately a
+# denylist, not an allowlist (issue #22 round 2 review flagged this as
+# incomplete protection against a merely-suspicious-looking-but-technically-
+# unblocked filename like "report (VERIFIED BY CEO).md" -- an allowlist
+# would close that too, at the cost of also rejecting legitimate unicode
+# filenames; not attempted here) -- this pass targets the structural
+# characters that could forge a fake citation boundary, not general
+# untrustworthiness, which the surrounding text already carries regardless
+# of the filename (see the "Security note" on extracted text a few
+# functions up in this file).
+_UNSAFE_DISPLAY_NAME_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f  \[\]]")
+_MAX_DISPLAY_NAME_CHARS = 255
+
+
+def _sanitize_display_name(raw: str) -> str:
+    """Strip path components and characters that could forge a RAG
+    attribution label boundary — see ``_UNSAFE_DISPLAY_NAME_CHARS`` above.
+    Capped length guards against an absurdly long filename bloating every
+    citation.
+
+    NFKC-normalizes first so lookalike characters collapse onto the ones
+    the regex actually targets — e.g. fullwidth brackets (U+FF3B/FF3D) fold
+    to plain ``[``/``]`` and get stripped, and NBSP/ideographic space fold
+    to a plain space. Also drops every Unicode "format" (category Cf)
+    character — zero-width space/joiners, bidi override marks, soft
+    hyphen — which render invisibly but would otherwise let two
+    differently-spelled display names be treated as the same identity by
+    anything that compares this string by eye. This does not defend
+    against homoglyphs (e.g. Cyrillic "а" for Latin "a"): NFKC doesn't fold
+    those, and doing so generally needs a confusables table, not attempted
+    here — same "structural, not general trust" scope as the denylist
+    comment above.
+    """
+    name = Path(raw).name  # strip any path components
+    name = unicodedata.normalize("NFKC", name)
+    name = "".join(ch for ch in name if unicodedata.category(ch) != "Cf")
+    name = _UNSAFE_DISPLAY_NAME_CHARS.sub("", name).strip()
+    return (name or "unnamed")[:_MAX_DISPLAY_NAME_CHARS]
+
+
 async def ingest_file(
     path: Path,
     store: ChromaDBStore,
     domain: str | None = None,
     collection: str = ChromaDBStore.COMPANY_COLLECTION,
+    *,
+    display_name: str | None = None,
 ) -> int:
+    """Extract, chunk, and upsert one file's text into ``collection``.
+
+    ``display_name`` (issue #22): when the caller reads ``path`` from a
+    throwaway location — a ``tempfile.NamedTemporaryFile`` that's deleted
+    right after this call, as both the attachment-ingest path and the
+    ``/documents`` upload route do — pass the real uploaded filename here.
+    It becomes the ``filename``/``source`` metadata (sanitized — see
+    ``_sanitize_display_name``) instead of the temp path, so an ingested
+    chunk is identifiable by its real name after the temp file no longer
+    exists. Identifiable is not the same as purgeable-by-name for every
+    caller: the ``/documents`` route pairs this with its own explicit
+    ``delete_documents(where={"filename": ...})`` call before ingesting
+    (see that route — safe there because it sits behind the app-wide
+    shared-secret auth gate), but the attachment-ingest path has no such
+    purge path today, and no per-collection isolation from curated
+    uploads either — tracked as a separate, not-yet-fixed issue (#25)
+    rather than folded into this fix.
+
+    Deliberately does NOT derive the chunk id from ``display_name`` — an
+    earlier version of this fix did, to also get automatic dedup on
+    re-upload, but that made ``display_name`` (attacker-influenced on the
+    attachment-ingest path) a shared collision key: two unrelated uploads
+    sharing a filename would upsert over the SAME chunk ids and silently
+    destroy each other's content. A per-surface namespace prefix was tried
+    next and still didn't close it — an unsanitized ``:`` in the filename
+    could forge a fake namespace prefix, and every sender within one
+    surface (e.g. every Discord user) still shared one namespace, so one
+    rostered user could already overwrite another's upload. Closing that
+    properly needs per-uploader identity threaded through 3 integration
+    surfaces, which issue #22 itself explicitly hedged as only "ideally"
+    wanted, not required. Chunk ids stay derived from ``path`` (unique per
+    call — every caller either reads a fresh tempfile or a real path that's
+    already unique by construction), so re-uploads accumulate distinct
+    chunk sets by default — callers that want overwrite-on-reupload (like
+    ``/documents``) get it by deleting the old set by filename themselves
+    first, not by relying on colliding ids.
+    """
     text = extract_text_from_file(path)
     if not text.strip():
         return 0
@@ -141,12 +225,15 @@ async def ingest_file(
     inferred_domain = domain or infer_domain_from_path(path)
     chunks = chunk_text(text, chunk_size=512, overlap=50)
 
+    name = _sanitize_display_name(display_name) if display_name else path.name
+    source_label = name if display_name else str(path)
+
     texts = chunks
     metadatas: list[dict[str, Any]] = [
         {
             "domain": inferred_domain,
-            "filename": path.name,
-            "source": str(path),
+            "filename": name,
+            "source": source_label,
             "chunk_index": i,
         }
         for i in range(len(chunks))

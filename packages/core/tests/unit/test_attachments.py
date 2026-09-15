@@ -111,6 +111,36 @@ async def test_schedule_ingest_uses_shared_store_not_a_fresh_construction():
     assert mock_ingest.await_args.args[1] is fake_store
 
 
+@pytest.mark.asyncio
+async def test_schedule_ingest_passes_real_filename_as_display_name():
+    """Regression test for issue #22: ingest_file must be called with
+    display_name=<real filename>, not left to fall back to the throwaway
+    tempfile.NamedTemporaryFile path it reads from (which is deleted
+    immediately after) — otherwise chunk metadata points at a path that
+    no longer exists instead of something attributable and purgeable."""
+    from openexecutive.integrations import attachments
+
+    fake_store = MagicMock()
+
+    with (
+        patch(
+            "openexecutive.orchestrator.store_access.get_shared_store",
+            return_value=fake_store,
+        ),
+        patch(
+            "openexecutive.knowledge.loader.ingest_file",
+            AsyncMock(return_value=3),
+        ) as mock_ingest,
+    ):
+        attachments._schedule_ingest(b"hello world", "quarterly-report.pdf")
+        pending = list(attachments._ingest_tasks)
+        assert pending, "expected a background ingest task to be scheduled"
+        await asyncio.gather(*pending)
+
+    mock_ingest.assert_awaited_once()
+    assert mock_ingest.await_args.kwargs["display_name"] == "quarterly-report.pdf"
+
+
 # --------------------------------------------------------------------------- #
 # build_attachment_output — image routing
 # --------------------------------------------------------------------------- #
