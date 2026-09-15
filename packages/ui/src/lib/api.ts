@@ -417,7 +417,7 @@ export async function deleteFailureFile(domain: string, filename: string): Promi
 // Knowledge search — "what would RAG retrieve" diagnostic
 // ---------------------------------------------------------------------------
 
-export type KnowledgeSourceType = "builtin" | "company" | "failures" | "external";
+export type KnowledgeSourceType = "builtin" | "company" | "failures" | "external" | "attachment";
 
 export interface KnowledgeSearchRequest {
   query: string;
@@ -427,6 +427,7 @@ export interface KnowledgeSearchRequest {
   n_company?: number;
   n_failures?: number;
   n_external?: number;
+  n_attachment?: number;
   include?: KnowledgeSourceType[];
 }
 
@@ -451,6 +452,7 @@ export interface KnowledgeSearchResponse {
   company: KnowledgeSearchHit[];
   failures: KnowledgeSearchHit[];
   external: KnowledgeSearchHit[];
+  attachment: KnowledgeSearchHit[];
 }
 
 export async function searchKnowledge(

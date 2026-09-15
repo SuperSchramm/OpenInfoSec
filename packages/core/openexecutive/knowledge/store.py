@@ -48,6 +48,13 @@ class ChromaDBStore(KnowledgeStore):
     # who can edit a shared page can inject text the agents will read.
     # Retrieved under its own clearly-labelled, lower-ranked section.
     NOTION_COLLECTION = "notion_wiki"
+    # Files sent as attachments to bot integrations (Discord, Telegram,
+    # web-chat upload). Kept SEPARATE from COMPANY_COLLECTION (issue #25)
+    # for the same reason as NOTION_COLLECTION: any rostered/authorized
+    # sender can put text here, not just an admin curating /documents, so
+    # it is at least as multi-writer and unreviewed as a Notion share.
+    # Retrieved under its own clearly-labelled, lower-ranked section.
+    ATTACHMENT_COLLECTION = "attachment_uploads"
 
     def __init__(self, persist_directory: str | Path = "./chroma_db") -> None:
         import chromadb
@@ -156,3 +163,18 @@ class ChromaDBStore(KnowledgeStore):
         leftover COMPANY rows tagged ``type=notion`` (pre-isolation ingest)."""
         self.delete_documents(collection=self.NOTION_COLLECTION, where={"type": "notion"})
         self.delete_documents(collection=self.COMPANY_COLLECTION, where={"type": "notion"})
+
+    def delete_attachment_docs(self) -> None:
+        """Delete and recreate the attachment_uploads collection, clearing
+        all ingested attachment chunks (issue #25). Mirrors
+        ``delete_company_docs`` — attachment content is per-company like
+        curated docs (not incrementally synced like Notion), so callers
+        that clear company state on a company switch (fixture load/unload,
+        factory reset, client-slot rebuild) must clear this alongside
+        ``delete_company_docs()`` or a previous company's attachment
+        uploads would silently survive into the new one."""
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            self._client.delete_collection(self.ATTACHMENT_COLLECTION)
+        self._get_or_create_collection(self.ATTACHMENT_COLLECTION)

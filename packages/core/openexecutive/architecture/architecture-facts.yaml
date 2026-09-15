@@ -2410,11 +2410,30 @@ integrations:
     Executive in the same turn as the text. Inbound documents
     (PDF/DOCX/TXT/MD/CSV) have their text extracted and inlined into the
     user message AND, when the sender is authorized (see below), are
-    indexed into the ChromaDB ``company_docs`` collection in a
+    indexed into ChromaDB's dedicated ``attachment_uploads`` collection
+    (issue #25 step 1 — NOT ``company_docs``, as of this fix) in a
     fire-and-forget background task, so attachments surface in future RAG
-    retrieval. Per-file cap 20 MB; extracted text truncated to 40 000
-    chars. Web chat exposes this through ``POST /chat/upload``
-    (multipart) — capped at 5 files per turn.
+    retrieval. Kept separate from ``company_docs`` because, like the
+    synced Notion wiki, attachment content is multi-writer and unreviewed
+    — any rostered/authorized sender can put text here, not just an
+    admin curating ``/documents``. ``knowledge/retriever.py`` renders
+    ``attachment_uploads`` hits under their own "Uploaded attachments
+    (unreviewed...)" heading, ranked below curated company docs, with the
+    same heading-spoofing neutralization already applied to Notion
+    content. ``ChromaDBStore.delete_attachment_docs()`` clears this
+    collection alongside ``delete_company_docs()``/``delete_notion_docs()``
+    on every company-switch boundary (fixture load/unload, factory reset,
+    client-slot switch) so one company's attachment uploads don't survive
+    into another's context — except a background ingest task that's still
+    extracting/writing when the switch fires: it isn't synchronized with
+    the wipe and can land content in the wrong company (tracked as issue
+    #26, not yet closed). No purge/retention mechanism exists yet
+    within a single company's attachment history — a re-sent attachment
+    still accumulates a fresh chunk set rather than deduping (tracked as
+    issue #25 step 2, deliberately deferred). Per-file cap 20 MB;
+    extracted text truncated to 40 000 chars. Web chat exposes this
+    through ``POST /chat/upload`` (multipart) — capped at 5 files per
+    turn.
 
     ``build_attachment_output()``/``process_attachments()`` take a
     required ``authorized: bool`` (issue #21 — no default, so every call

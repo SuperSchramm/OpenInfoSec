@@ -88,6 +88,19 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
                     "distance": 0.42,
                 }
             ]
+        if collection == "attachment_uploads":
+            return [
+                {
+                    "text": "A user's Discord attachment about strategy.",
+                    "metadata": {
+                        "filename": "upload.md",
+                        "domain": "strategy",
+                        "chunk_index": 0,
+                        "type": "attachment",
+                    },
+                    "distance": 0.35,
+                }
+            ]
         return []
 
     fake_store = MagicMock()
@@ -111,6 +124,27 @@ def test_search_partitions_builtin_and_external(client: TestClient) -> None:
     assert external_files == ["openstax-finance.pdf"]
     assert data["company"][0]["filename"] == "deck.pdf"
     assert data["failures"][0]["filename"] == "kodak-digital.md"
+    assert data["attachment"][0]["filename"] == "upload.md"
+
+
+def test_search_attachment_bucket_can_be_excluded(client: TestClient) -> None:
+    """Regression test for issue #25 step 1's security-review finding: an
+    operator must be able to search/enumerate ATTACHMENT_COLLECTION now
+    that it no longer shares COMPANY_COLLECTION with curated uploads —
+    without this bucket there was no detection surface for what an
+    attacker-influenced attachment upload actually put into the shared
+    knowledge base."""
+    res = client.post(
+        "/knowledge/search", json={"query": "x", "include": ["attachment"]}
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["builtin"] == []
+    assert data["company"] == []
+    assert data["failures"] == []
+    assert data["external"] == []
+    assert len(data["attachment"]) == 1
+    assert data["attachment"][0]["filename"] == "upload.md"
 
 
 def test_search_specialist_filters_to_domains(client: TestClient) -> None:

@@ -159,6 +159,7 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
         suffix = _suffix_from_filename(filename)
         try:
             from openexecutive.knowledge.loader import ingest_file
+            from openexecutive.knowledge.store import ChromaDBStore
             from openexecutive.orchestrator.store_access import get_shared_store as _get_store
 
             store = _get_store()
@@ -180,11 +181,22 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
                 # /documents route, there is deliberately no delete-before-
                 # ingest here — this sender isn't behind the same auth gate,
                 # so a filename-keyed delete would just be the collision bug
-                # again. Known gaps this leaves (no purge path, no isolation
-                # from curated-doc trust) are tracked in issue #25, not fixed
-                # here.
+                # again.
+                #
+                # collection=ATTACHMENT_COLLECTION (issue #25 step 1): this
+                # content is sent by any rostered/authorized sender, not
+                # curated by an admin, so it no longer shares COMPANY_COLLECTION
+                # (and therefore the "curated company doc" trust presentation)
+                # with /documents uploads — see retriever.py's attachment
+                # section and ChromaDBStore.ATTACHMENT_COLLECTION's docstring.
+                # A purge/retention path for this collection is still a known
+                # gap, deliberately deferred as issue #25 step 2.
                 count = await ingest_file(
-                    tmp_path, store, domain="company_docs", display_name=filename
+                    tmp_path,
+                    store,
+                    domain="company_docs",
+                    collection=ChromaDBStore.ATTACHMENT_COLLECTION,
+                    display_name=filename,
                 )
                 logger.info(
                     "attachments: indexed %d chunks from %s into ChromaDB",

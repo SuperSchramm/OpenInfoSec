@@ -470,6 +470,14 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
     # ── 3. Clear + re-index ChromaDB company collection ───────────────────
     store = ChromaDBStore(persist_directory=settings.vector_store_path)
     store.delete_company_docs()
+    # Attachment uploads are per-company too (issue #25 — attachment
+    # content lives in its own collection now), cleared alongside company
+    # docs so a completed switch doesn't leave a prior company's
+    # attachment content readable in the new one. A late-finishing
+    # background ingest task can still race a switch that starts
+    # mid-upload — pre-existing gap, tracked separately as issue #26, not
+    # closed by this call.
+    store.delete_attachment_docs()
     # Recent-research artifacts are per-company; never let a new company
     # inherit the prior company's research.
     store.delete_documents(
@@ -685,6 +693,14 @@ async def reset_all_state(
 
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
         store.delete_company_docs()
+        # Attachment uploads are per-company too (issue #25 — attachment
+        # content lives in its own collection now), cleared alongside
+        # company docs so a completed switch doesn't leave a prior
+        # company's attachment content readable in the new one. A
+        # late-finishing background ingest task can still race a switch
+        # that starts mid-upload — pre-existing gap, tracked separately as
+        # issue #26, not closed by this call.
+        store.delete_attachment_docs()
         store.delete_documents(
             collection=ChromaDBStore.RESEARCH_COLLECTION,
             where={"type": "recent_research"},

@@ -29,7 +29,13 @@ const SPECIALISTS = [
   { id: "talent", label: "Talent (HR + Strategy)" },
 ];
 
-const ALL_SOURCES: KnowledgeSourceType[] = ["builtin", "company", "failures", "external"];
+const ALL_SOURCES: KnowledgeSourceType[] = [
+  "builtin",
+  "company",
+  "failures",
+  "external",
+  "attachment",
+];
 
 export default function QueryPanel({ domains, onOpenFile }: QueryPanelProps) {
   const [query, setQuery] = useState("");
@@ -227,6 +233,18 @@ export default function QueryPanel({ domains, onOpenFile }: QueryPanelProps) {
             hits={result.external}
             accent="amber"
           />
+          <ResultGroup
+            title="Uploaded attachments (unreviewed)"
+            kind="attachment"
+            // Defensive fallback (round-2 security review): the UI and API
+            // are separate Fly apps that can deploy out of order — if this
+            // build ships before the API's `attachment` field, `result`
+            // would otherwise carry `undefined` here and crash the whole
+            // panel on `hits.length` below instead of rendering the other
+            // four buckets.
+            hits={result.attachment ?? []}
+            accent="slate"
+          />
         </div>
       )}
     </div>
@@ -241,9 +259,9 @@ function ResultGroup({
   onOpenFile,
 }: {
   title: string;
-  kind: "builtin" | "failures" | "company" | "external";
+  kind: "builtin" | "failures" | "company" | "external" | "attachment";
   hits: KnowledgeSearchHit[];
-  accent: "indigo" | "rose" | "emerald" | "amber";
+  accent: "indigo" | "rose" | "emerald" | "amber" | "slate";
   onOpenFile?: (kind: "builtin" | "failures", domain: string, filename: string) => void;
 }) {
   const accentClass = {
@@ -251,6 +269,7 @@ function ResultGroup({
     rose: "text-rose-400 border-l-rose-500/50",
     emerald: "text-emerald-400 border-l-emerald-500/40",
     amber: "text-amber-400 border-l-amber-500/40",
+    slate: "text-slate-400 border-l-slate-500/40",
   }[accent];
   const isOpenable = kind === "builtin" || kind === "failures";
 

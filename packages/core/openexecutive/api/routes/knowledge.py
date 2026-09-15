@@ -453,7 +453,7 @@ async def delete_failure_file(domain: str, filename: str, request: Request) -> d
 # ---------------------------------------------------------------------------
 
 
-_VALID_SOURCE_TYPES = {"builtin", "company", "failures", "external"}
+_VALID_SOURCE_TYPES = {"builtin", "company", "failures", "external", "attachment"}
 
 # Max characters of chunk text returned per search hit. UI shows ~600 chars,
 # leaving headroom for "…" truncation indicator and tail context.
@@ -477,6 +477,7 @@ class KnowledgeSearchRequest(BaseModel):
     n_company: int = 3
     n_failures: int = 3
     n_external: int = 5
+    n_attachment: int = 3
     include: list[str] | None = None  # subset of _VALID_SOURCE_TYPES
 
 
@@ -501,6 +502,7 @@ class KnowledgeSearchResponse(BaseModel):
     company: list[SearchHit]
     failures: list[SearchHit]
     external: list[SearchHit]
+    attachment: list[SearchHit]
 
 
 def _hits_from_chroma(
@@ -583,6 +585,7 @@ async def search_knowledge(
     n_company = max(1, min(body.n_company, _MAX_RESULTS_PER_BUCKET))
     n_failures = max(1, min(body.n_failures, _MAX_RESULTS_PER_BUCKET))
     n_external = max(1, min(body.n_external, _MAX_RESULTS_PER_BUCKET))
+    n_attachment = max(1, min(body.n_attachment, _MAX_RESULTS_PER_BUCKET))
 
     def _query_collection(collection: str, n: int) -> list[dict[str, object]]:
         try:
@@ -590,6 +593,23 @@ async def search_knowledge(
                 query_text=body.query,
                 collection=collection,
                 domain_filter=effective_domains,
+                n_results=n,
+            )
+        except Exception:
+            return []
+
+    def _query_collection_unscoped(collection: str, n: int) -> list[dict[str, object]]:
+        """Same as ``_query_collection`` but never applies a domain filter —
+        for collections whose items carry no reliable per-domain tag
+        (round-2 security review: ATTACHMENT_COLLECTION chunks are tagged
+        domain="company_docs", which matches no real DOMAIN_MAP value, so
+        a domain-scoped query against it would silently return zero rows
+        every time; mirrors ``retrieve()``'s identical treatment)."""
+        try:
+            return store.query(
+                query_text=body.query,
+                collection=collection,
+                domain_filter=None,
                 n_results=n,
             )
         except Exception:
@@ -635,6 +655,18 @@ async def search_knowledge(
             _query_collection(ChromaDBStore.FAILURES_COLLECTION, n_failures)
         )
 
+    # issue #25 security review round 1: without this bucket, an operator
+    # had no way to search/peek/enumerate attachment_uploads at all once
+    # it stopped sharing COMPANY_COLLECTION with /documents uploads —
+    # detection tooling regressed even though the trust boundary improved.
+    # Unscoped (round 2): a domain-filtered query here would silently
+    # return zero rows every time — see _query_collection_unscoped.
+    attachment_hits: list[SearchHit] = []
+    if "attachment" in include:
+        attachment_hits = _hits_from_chroma(
+            _query_collection_unscoped(ChromaDBStore.ATTACHMENT_COLLECTION, n_attachment)
+        )
+
     return KnowledgeSearchResponse(
         query=body.query,
         effective_domains=effective_domains,
@@ -643,4 +675,5 @@ async def search_knowledge(
         company=company_hits,
         failures=failure_hits,
         external=external_hits,
+        attachment=attachment_hits,
     )

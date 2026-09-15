@@ -195,9 +195,15 @@ async def ingest_file(
     ``delete_documents(where={"filename": ...})`` call before ingesting
     (see that route — safe there because it sits behind the app-wide
     shared-secret auth gate), but the attachment-ingest path has no such
-    purge path today, and no per-collection isolation from curated
-    uploads either — tracked as a separate, not-yet-fixed issue (#25)
-    rather than folded into this fix.
+    purge path today — tracked as issue #25 step 2, deliberately deferred
+    pending a retention-policy decision, rather than folded into this fix.
+    (Issue #25 step 1 — the attachment path no longer *shares* a
+    collection with curated ``/documents`` uploads at all; see
+    ``ChromaDBStore.ATTACHMENT_COLLECTION`` and the ``collection`` param
+    below. Chunks written to that collection also get ``type="attachment"``
+    metadata, mirroring how Notion content is tagged ``type="notion"``.
+    The remaining gap is purge/retention *within* that collection, not
+    cross-collection trust confusion.)
 
     Deliberately does NOT derive the chunk id from ``display_name`` — an
     earlier version of this fix did, to also get automatic dedup on
@@ -228,6 +234,19 @@ async def ingest_file(
     name = _sanitize_display_name(display_name) if display_name else path.name
     source_label = name if display_name else str(path)
 
+    # type="attachment" (issue #25 security review round 1): derived from
+    # `collection`, never a separate param, so the tag can never drift from
+    # the collection a chunk actually lives in. Doesn't retroactively fix
+    # attachment chunks ingested before this fix (they're already sitting,
+    # untagged, in COMPANY_COLLECTION, indistinguishable from curated docs
+    # — see the issue #25 closing notes on why that gap has no clean
+    # automated remediation) — this is defense-in-depth for every
+    # ATTACHMENT_COLLECTION write from here on, mirroring how Notion
+    # content already carries ``type="notion"`` for the same reason.
+    extra_metadata: dict[str, Any] = (
+        {"type": "attachment"} if collection == ChromaDBStore.ATTACHMENT_COLLECTION else {}
+    )
+
     texts = chunks
     metadatas: list[dict[str, Any]] = [
         {
@@ -235,6 +254,7 @@ async def ingest_file(
             "filename": name,
             "source": source_label,
             "chunk_index": i,
+            **extra_metadata,
         }
         for i in range(len(chunks))
     ]

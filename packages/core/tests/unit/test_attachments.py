@@ -141,6 +141,40 @@ async def test_schedule_ingest_passes_real_filename_as_display_name():
     assert mock_ingest.await_args.kwargs["display_name"] == "quarterly-report.pdf"
 
 
+@pytest.mark.asyncio
+async def test_schedule_ingest_uses_attachment_collection_not_company():
+    """Regression test for issue #25 step 1: attachment ingest must target
+    ChromaDBStore.ATTACHMENT_COLLECTION, not the default COMPANY_COLLECTION
+    — otherwise attachment content (sent by any rostered/authorized user,
+    not curated by an admin) shares a collection with /documents uploads
+    and gets rendered under the same "curated company documents" trust
+    heading in retriever.py."""
+    from openexecutive.integrations import attachments
+    from openexecutive.knowledge.store import ChromaDBStore
+
+    fake_store = MagicMock()
+
+    with (
+        patch(
+            "openexecutive.orchestrator.store_access.get_shared_store",
+            return_value=fake_store,
+        ),
+        patch(
+            "openexecutive.knowledge.loader.ingest_file",
+            AsyncMock(return_value=3),
+        ) as mock_ingest,
+    ):
+        attachments._schedule_ingest(b"hello world", "notes.txt")
+        pending = list(attachments._ingest_tasks)
+        assert pending, "expected a background ingest task to be scheduled"
+        await asyncio.gather(*pending)
+
+    mock_ingest.assert_awaited_once()
+    assert (
+        mock_ingest.await_args.kwargs["collection"] == ChromaDBStore.ATTACHMENT_COLLECTION
+    )
+
+
 # --------------------------------------------------------------------------- #
 # build_attachment_output — image routing
 # --------------------------------------------------------------------------- #

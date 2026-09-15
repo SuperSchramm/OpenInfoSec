@@ -97,6 +97,7 @@ def _emit_retrieval_audit(
     company_results: list[dict[str, Any]],
     annotation_count: int,
     collection: str,
+    attachment_results: list[dict[str, Any]] | None = None,
 ) -> None:
     """Fire-and-forget audit emit for a retrieval pass.
 
@@ -104,8 +105,21 @@ def _emit_retrieval_audit(
     Executive at turn entry; emits None for both when called outside a
     turn (CLI, ad-hoc workflows) so the row is still captured but won't
     cluster into a session timeline. log_event already swallows.
+
+    ``attachment_results`` (issue #25 security review round 1): attachment
+    content is the one class of retrieved text that is attacker-influenced
+    (any rostered/authorized sender's DM upload, not admin-curated), so it
+    is the class of content an incident responder would most need to see
+    in this audit trail if it ever poisoned a turn — unlike
+    ``builtin``/``company``, leaving it out here wouldn't just be an
+    omission, it would blind forensics on exactly the untrusted input this
+    whole isolation effort exists to track. Optional/defaulted rather than
+    required like the other ``*_results`` params only so this function's
+    signature doesn't churn for existing callers if a future reviewer adds
+    another optional collection the same way.
     """
     session_id, turn_id = get_active_ids()
+    attachment_results = attachment_results or []
 
     def _chunks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
@@ -120,7 +134,7 @@ def _emit_retrieval_audit(
             for r in rows
         ]
 
-    total = len(builtin_results) + len(company_results)
+    total = len(builtin_results) + len(company_results) + len(attachment_results)
     domain_str = ",".join(domain_filter) if domain_filter else "*"
     _audit_log(
         "knowledge_retrieval",
@@ -135,6 +149,7 @@ def _emit_retrieval_audit(
             "specialist": specialist_name,
             "builtin_count": len(builtin_results),
             "company_count": len(company_results),
+            "attachment_count": len(attachment_results),
             "annotation_count": annotation_count,
         },
         full={
@@ -143,6 +158,7 @@ def _emit_retrieval_audit(
             "specialist": specialist_name,
             "builtin_chunks": _chunks(builtin_results),
             "company_chunks": _chunks(company_results),
+            "attachment_chunks": _chunks(attachment_results),
         },
     )
 
@@ -305,6 +321,29 @@ def retrieve(
         r for r in raw_notion if _passes_threshold(r, distance_threshold)
     ]
 
+    # Attachment uploads — isolated from COMPANY because, like a Notion
+    # share, this is multi-writer and unreviewed: any rostered/authorized
+    # sender can put text here via a bot integration, not just an admin
+    # curating /documents (issue #25). Ranked below curated company docs
+    # and labelled so specialists do not treat it as policy.
+    #
+    # domain_filter=None (round-2 security review): attachment chunks are
+    # tagged domain="company_docs" (integrations/attachments.py), which is
+    # not a real DOMAIN_MAP value and appears in no DOMAIN_ALIASES entry —
+    # a domain-scoped query would silently match zero rows every time,
+    # making this section unreachable for any specialist-scoped retrieve()
+    # call. Same unreliable-per-item-domain reasoning as RESEARCH_COLLECTION
+    # below; never domain-scoped for the same reason.
+    raw_attachments = store.query(
+        query_text=query,
+        collection=ChromaDBStore.ATTACHMENT_COLLECTION,
+        domain_filter=None,
+        n_results=3,
+    )
+    attachment_results = [
+        r for r in raw_attachments if _passes_threshold(r, distance_threshold)
+    ]
+
     # Recent research artifacts — kept in a separate collection and ranked
     # BELOW curated company docs. These are unvetted, web-sourced summaries
     # from executive_research runs, so they are clearly labelled as such and
@@ -330,14 +369,16 @@ def retrieve(
         specialist_name=specialist_name,
         builtin_results=builtin_results,
         company_results=company_results,
+        attachment_results=attachment_results,
         annotation_count=len(active_annotations),
-        collection="builtin+company",
+        collection="builtin+company+attachment",
     )
 
     if (
         not builtin_results
         and not company_results
         and not notion_results
+        and not attachment_results
         and not research_results
         and not active_annotations
     ):
@@ -360,6 +401,17 @@ def retrieve(
             filename = r["metadata"].get("filename", "unknown")
             parts.append(
                 f"[notion:{filename}]\n{_format_untrusted_wiki(r['text'])}"
+            )
+
+    if attachment_results:
+        parts.append(
+            "### Uploaded attachments (unreviewed, sent by any authorized "
+            "user — weigh below curated company documents):"
+        )
+        for r in attachment_results:
+            filename = r["metadata"].get("filename", "unknown")
+            parts.append(
+                f"[attachment:{filename}]\n{_format_untrusted_wiki(r['text'])}"
             )
 
     if research_results:
