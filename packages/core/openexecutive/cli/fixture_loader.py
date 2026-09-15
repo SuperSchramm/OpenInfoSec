@@ -227,7 +227,9 @@ def reconcile_honcho_workspace_on_startup(settings: Any) -> None:
         logger.exception("honcho: workspace reconcile on startup failed")
 
 
-async def load_fixture(fixture_name: str, settings: Any) -> dict[str, Any]:
+async def load_fixture(
+    fixture_name: str, settings: Any, *, app_state: Any | None = None
+) -> dict[str, Any]:
     """Replace the active company context with the named fixture.
 
     Before the FIRST fixture load on an environment, automatically snapshots
@@ -235,6 +237,9 @@ async def load_fixture(fixture_name: str, settings: Any) -> dict[str, Any]:
     ``unload_fixture()``. Subsequent fixture-to-fixture switches do NOT
     overwrite the backup (the live state at that point is a previous fixture,
     not the user's company).
+
+    ``app_state`` (optional, issue #23): see ``unload_fixture``'s docstring —
+    same in-lock store-swap treatment, threaded through to ``_load_from_dir``.
 
     Returns a summary dict with counts of what was loaded.
     """
@@ -246,11 +251,11 @@ async def load_fixture(fixture_name: str, settings: Any) -> dict[str, Any]:
     if not profile_path.exists():
         raise FixtureNotFoundError(f"Fixture {fixture_name!r} has no profile.yaml")
 
-    return await _load_from_dir(fixture_name, fixture_dir, settings)
+    return await _load_from_dir(fixture_name, fixture_dir, settings, app_state=app_state)
 
 
 async def _load_from_dir(
-    fixture_name: str, fixture_dir: Path, settings: Any
+    fixture_name: str, fixture_dir: Path, settings: Any, *, app_state: Any | None = None
 ) -> dict[str, Any]:
     """Apply a fixture from an on-disk directory and record it as active.
 
@@ -260,6 +265,8 @@ async def _load_from_dir(
     the user's state on the first ever load, swaps the Honcho workspace, and
     writes the active-fixture sentinel — all behavior is identical regardless
     of where ``fixture_dir`` came from.
+
+    ``app_state`` (optional, issue #23): see ``unload_fixture``'s docstring.
     """
     async with _FIXTURE_OP_LOCK:
         # If a client slot is active, the live state belongs to that client —
@@ -336,20 +343,28 @@ async def _load_from_dir(
 
         summary["fixture"] = fixture_name
         summary["auto_snapshot_taken"] = auto_snapshot_taken
+
+        # In-lock store swap (issue #23) — see _swap_shared_store's docstring.
+        _swap_shared_store(app_state, settings)
+
         return summary
 
 
-async def load_fixture_any(fixture_name: str, settings: Any) -> dict[str, Any]:
+async def load_fixture_any(
+    fixture_name: str, settings: Any, *, app_state: Any | None = None
+) -> dict[str, Any]:
     """Load a curated (disk) OR generated (DB) fixture by name.
 
     Curated fixtures resolve to their repo ``fixtures/companies/<name>/`` dir.
     Generated fixtures are materialized from the ``generated_fixtures`` table
     into a temp directory and loaded through the identical ``_load_from_dir``
     path, so they get the same auto-snapshot / sentinel / Honcho behavior.
+
+    ``app_state`` (optional, issue #23): see ``unload_fixture``'s docstring.
     """
     fixture_dir = FIXTURES_ROOT / fixture_name
     if fixture_dir.exists() and (fixture_dir / "profile.yaml").exists():
-        return await _load_from_dir(fixture_name, fixture_dir, settings)
+        return await _load_from_dir(fixture_name, fixture_dir, settings, app_state=app_state)
 
     # Not a curated fixture — try the generated-fixtures table.
     from openexecutive.fixtures import generator as fixtures_generator
@@ -366,7 +381,7 @@ async def load_fixture_any(fixture_name: str, settings: Any) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="oe-fixture-") as tmp:
         tmp_dir = Path(tmp)
         fixtures_generator.materialize_to_dir(record, tmp_dir)
-        return await _load_from_dir(fixture_name, tmp_dir, settings)
+        return await _load_from_dir(fixture_name, tmp_dir, settings, app_state=app_state)
 
 
 def list_all_fixtures() -> list[dict[str, Any]]:
@@ -387,6 +402,36 @@ def list_all_fixtures() -> list[dict[str, Any]]:
         logger.exception("list_all_fixtures: failed to read generated fixtures")
         generated = []
     return generated + curated
+
+
+def _swap_shared_store(app_state: Any | None, settings: Any) -> None:
+    """Construct a fresh ``ChromaDBStore`` and publish it into
+    ``app_state.store`` and the ``mcp_server`` singleton (see
+    ``publish_swapped_store`` — issue #16).
+
+    Shared by ``reset_all_state``, ``unload_fixture``, and
+    ``_load_from_dir``, each of which calls this from inside its own
+    ``_FIXTURE_OP_LOCK`` scope, right before releasing it (issue #23):
+    constructing the swap-target store here, while the lock is still held,
+    closes the window where a concurrent ``/fixtures/*`` request could
+    construct its own ``PersistentClient`` against the same on-disk path
+    while a swap was still pending (issue #13 — concurrent
+    ``PersistentClient`` construction against one path is unsafe).
+
+    No-ops when ``app_state`` is ``None`` or has no ``store`` attribute, so
+    a bare CLI call (no app_state) or a bare unit test (no app.state.store)
+    skips constructing a ``ChromaDBStore`` — and its embedding model —
+    that nothing would use.
+    """
+    if app_state is None or not hasattr(app_state, "store"):
+        return
+
+    from openexecutive.knowledge.store import ChromaDBStore
+    from openexecutive.orchestrator.store_access import publish_swapped_store
+
+    publish_swapped_store(
+        app_state, ChromaDBStore(persist_directory=settings.vector_store_path)
+    )
 
 
 async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str, Any]:
@@ -506,11 +551,23 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
     }
 
 
-async def unload_fixture(settings: Any) -> dict[str, Any]:
+async def unload_fixture(
+    settings: Any, *, app_state: Any | None = None
+) -> dict[str, Any]:
     """Restore the user's original state from ``_user_backup/``.
 
     Raises ``FixtureNotFoundError`` if no snapshot has been taken yet — there
     is no original state to restore to.
+
+    ``app_state`` (optional, issue #23): FastAPI's ``request.app.state``.
+    When provided, the shared store is swapped *inside* this function's
+    ``_FIXTURE_OP_LOCK`` — mirroring ``reset_all_state`` — instead of the
+    caller constructing a second ``ChromaDBStore`` after the lock has
+    already been released, which left a window for a concurrent
+    ``/fixtures/*`` request to construct its own client against the same
+    on-disk path while this one was still mid-swap (see issue #13 on why
+    concurrent ``PersistentClient`` construction against one path is
+    unsafe).
     """
     async with _FIXTURE_OP_LOCK:
         backup = _user_backup_dir(settings)
@@ -575,6 +632,10 @@ async def unload_fixture(settings: Any) -> dict[str, Any]:
             )
 
         summary["restored_from_backup"] = True
+
+        # In-lock store swap (issue #23) — see _swap_shared_store's docstring.
+        _swap_shared_store(app_state, settings)
+
         return summary
 
 
@@ -811,18 +872,8 @@ async def reset_all_state(
         except Exception:
             logger.exception("reset: clearing active-client sentinel failed")
 
-        # 7. Swap the shared store (and the mcp_server singleton alongside it
-        # — issue #16) inside the lock to close the race where a concurrent
-        # reader could otherwise see the deleted/recreated collection through
-        # the previous store instance. Guarded here (rather than inside the
-        # helper) so a bare CLI reset with no app_state skips constructing a
-        # ChromaDBStore — and its embedding model — that nothing would use.
-        if app_state is not None and hasattr(app_state, "store"):
-            from openexecutive.orchestrator.store_access import publish_swapped_store
-
-            publish_swapped_store(
-                app_state, ChromaDBStore(persist_directory=settings.vector_store_path)
-            )
+        # 7. In-lock store swap (issue #23) — see _swap_shared_store's docstring.
+        _swap_shared_store(app_state, settings)
 
         return {
             "reset": True,

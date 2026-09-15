@@ -96,23 +96,13 @@ async def fixtures_unload(request: Request) -> dict:
 
     settings = get_settings()
     try:
-        result = await unload_fixture(settings)
+        # app_state (issue #23): unload_fixture swaps the shared store (and
+        # the mcp_server singleton alongside it — issue #16) itself, inside
+        # its own destructive-op lock, instead of this route constructing a
+        # second ChromaDBStore after the lock has already been released.
+        return await unload_fixture(settings, app_state=request.app.state)
     except FixtureNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    # Mirror the load route: replace the shared store (and the mcp_server
-    # singleton alongside it — issue #16) so subsequent requests and tool
-    # handlers alike see the freshly-rebuilt company_docs collection.
-    if hasattr(request.app.state, "store"):
-        from openexecutive.knowledge.store import ChromaDBStore
-        from openexecutive.orchestrator.store_access import publish_swapped_store
-
-        publish_swapped_store(
-            request.app.state,
-            ChromaDBStore(persist_directory=settings.vector_store_path),
-        )
-
-    return result
 
 
 @router.post("/fixtures/{name}/load")
@@ -130,24 +120,13 @@ async def load_fixture(name: str, request: Request) -> dict:
 
     settings = get_settings()
     try:
-        result = await load_fixture_any(name, settings)
+        # app_state (issue #23): load_fixture_any swaps the shared store (and
+        # the mcp_server singleton alongside it — issue #16) itself, inside
+        # its own destructive-op lock, instead of this route constructing a
+        # second ChromaDBStore after the lock has already been released.
+        return await load_fixture_any(name, settings, app_state=request.app.state)
     except FixtureNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    # If the app has a shared store in state, replace it with a fresh instance
-    # (and refresh the mcp_server singleton alongside it — issue #16) so the
-    # new company_docs collection is visible to subsequent requests and tool
-    # handlers alike.
-    if hasattr(request.app.state, "store"):
-        from openexecutive.knowledge.store import ChromaDBStore
-        from openexecutive.orchestrator.store_access import publish_swapped_store
-
-        publish_swapped_store(
-            request.app.state,
-            ChromaDBStore(persist_directory=settings.vector_store_path),
-        )
-
-    return result
 
 
 @router.post("/fixtures/generate")

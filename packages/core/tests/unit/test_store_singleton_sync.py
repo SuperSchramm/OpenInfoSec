@@ -51,40 +51,210 @@ def _fixtures_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(app)
 
 
-def test_fixtures_unload_refreshes_mcp_server_singleton(
+def test_fixtures_unload_passes_app_state_through(
     _fixtures_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "openexecutive.cli.fixture_loader.unload_fixture",
-        lambda settings: _async_result({"unloaded": True}),
-    )
-    monkeypatch.setattr(ChromaDBStore, "__init__", lambda self, **_kw: None)
+    """issue #23: the route no longer constructs the swap-target store or
+    calls publish_swapped_store itself — unload_fixture now does that
+    inside its own _FIXTURE_OP_LOCK (see the new tests below). The route's
+    only remaining responsibility here is threading request.app.state
+    through so unload_fixture can do the swap."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_unload(settings: Any, *, app_state: Any = None) -> dict:
+        captured["app_state"] = app_state
+        return {"unloaded": True}
+
+    monkeypatch.setattr("openexecutive.cli.fixture_loader.unload_fixture", _fake_unload)
 
     resp = _fixtures_client.post("/fixtures/unload")
 
     assert resp.status_code == 200
-    assert mcp_server.get_store() is not None
-    assert mcp_server.get_store() is _fixtures_client.app.state.store
+    assert captured["app_state"] is _fixtures_client.app.state
 
 
-def test_load_fixture_refreshes_mcp_server_singleton(
+def test_load_fixture_route_passes_app_state_through(
     _fixtures_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "openexecutive.cli.fixture_loader.load_fixture_any",
-        lambda name, settings: _async_result({"loaded": name}),
-    )
-    monkeypatch.setattr(ChromaDBStore, "__init__", lambda self, **_kw: None)
+    """issue #23: same as above for the load route / load_fixture_any."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_load(name: str, settings: Any, *, app_state: Any = None) -> dict:
+        captured["name"] = name
+        captured["app_state"] = app_state
+        return {"loaded": name}
+
+    monkeypatch.setattr("openexecutive.cli.fixture_loader.load_fixture_any", _fake_load)
 
     resp = _fixtures_client.post("/fixtures/demo-startup/load")
 
     assert resp.status_code == 200
-    assert mcp_server.get_store() is not None
-    assert mcp_server.get_store() is _fixtures_client.app.state.store
+    assert captured["name"] == "demo-startup"
+    assert captured["app_state"] is _fixtures_client.app.state
 
 
 async def _async_result(value: Any) -> Any:
     return value
+
+
+# --------------------------------------------------------------------------- #
+# cli/fixture_loader.py — unload_fixture / load_fixture_any (issue #23)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture()
+def _fixture_op_settings_stub(tmp_path: Path) -> Any:
+    profile_path = tmp_path / "company" / "profile.yaml"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text("name: ''\n")
+    return type(
+        "S",
+        (),
+        {
+            "vector_store_path": tmp_path / "chroma",
+            "company_profile_path": profile_path,
+            "honcho_workspace_id": "openexec-test",
+        },
+    )()
+
+
+class _AppStateStub:
+    pass
+
+
+def test_unload_fixture_refreshes_mcp_server_singleton_via_app_state(
+    _fixture_op_settings_stub: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backup = _fixture_op_settings_stub.company_profile_path.parent / "_user_backup"
+    backup.mkdir(parents=True, exist_ok=True)
+    (backup / "profile.yaml").write_text("name: ''\n")
+    monkeypatch.setattr(
+        fixture_loader, "_apply_state_from_source",
+        lambda src, st: _async_result({"restored": True}),
+    )
+
+    app_state = _AppStateStub()
+    app_state.store = object()  # pre-swap sentinel
+
+    result = asyncio.run(
+        fixture_loader.unload_fixture(_fixture_op_settings_stub, app_state=app_state)
+    )
+
+    assert result["restored_from_backup"] is True
+    assert mcp_server.get_store() is app_state.store
+
+
+def test_unload_fixture_constructs_swap_store_while_lock_held(
+    _fixture_op_settings_stub: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actual issue #23 regression: before this fix, the route
+    constructed the swap-target ChromaDBStore and called
+    publish_swapped_store AFTER unload_fixture had already released
+    _FIXTURE_OP_LOCK — leaving a window where a concurrent /fixtures/*
+    request could construct its own PersistentClient against the same
+    on-disk path while the swap was still pending (issue #13: concurrent
+    PersistentClient construction against one path is unsafe). The fix
+    moved the swap-target construction inside unload_fixture's own lock
+    scope. This test records whether the lock is held at the moment
+    ChromaDBStore.__init__ runs and fails if it ever isn't."""
+    backup = _fixture_op_settings_stub.company_profile_path.parent / "_user_backup"
+    backup.mkdir(parents=True, exist_ok=True)
+    (backup / "profile.yaml").write_text("name: ''\n")
+    monkeypatch.setattr(
+        fixture_loader, "_apply_state_from_source",
+        lambda src, st: _async_result({"restored": True}),
+    )
+
+    app_state = _AppStateStub()
+    app_state.store = object()
+
+    lock_held_at_construction: list[bool] = []
+    original_init = ChromaDBStore.__init__
+
+    def _tracking_init(self: Any, *a: Any, **k: Any) -> None:
+        lock_held_at_construction.append(fixture_loader._FIXTURE_OP_LOCK.locked())
+        original_init(self, *a, **k)
+
+    with patch.object(ChromaDBStore, "__init__", _tracking_init):
+        asyncio.run(
+            fixture_loader.unload_fixture(_fixture_op_settings_stub, app_state=app_state)
+        )
+
+    assert lock_held_at_construction, "expected the swap-target ChromaDBStore to be constructed"
+    assert all(lock_held_at_construction), (
+        "the swap-target store was constructed while _FIXTURE_OP_LOCK was "
+        "NOT held -- this is the issue #23 regression: a concurrent "
+        "/fixtures/* request could construct its own PersistentClient "
+        "against the same on-disk path while this swap was still pending"
+    )
+
+
+def test_load_fixture_any_constructs_swap_store_while_lock_held(
+    _fixture_op_settings_stub: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same regression proof as above, for the load path (load_fixture_any
+    → _load_from_dir), which had the identical after-the-lock construction
+    bug for both curated and generated fixtures."""
+    fixture_root = tmp_path / "fixtures"
+    fixture_root.mkdir()
+    (fixture_root / "bombas").mkdir()
+    (fixture_root / "bombas" / "profile.yaml").write_text("name: Bombas\n")
+    monkeypatch.setattr(fixture_loader, "FIXTURES_ROOT", fixture_root)
+    monkeypatch.setattr(
+        fixture_loader, "_apply_state_from_source",
+        lambda src, st: _async_result({"loaded": True}),
+    )
+
+    app_state = _AppStateStub()
+    app_state.store = object()
+
+    lock_held_at_construction: list[bool] = []
+    original_init = ChromaDBStore.__init__
+
+    def _tracking_init(self: Any, *a: Any, **k: Any) -> None:
+        lock_held_at_construction.append(fixture_loader._FIXTURE_OP_LOCK.locked())
+        original_init(self, *a, **k)
+
+    with patch.object(ChromaDBStore, "__init__", _tracking_init):
+        result = asyncio.run(
+            fixture_loader.load_fixture_any(
+                "bombas", _fixture_op_settings_stub, app_state=app_state
+            )
+        )
+
+    assert result["fixture"] == "bombas"
+    assert mcp_server.get_store() is app_state.store
+    assert lock_held_at_construction, "expected the swap-target ChromaDBStore to be constructed"
+    assert all(lock_held_at_construction), (
+        "the swap-target store was constructed while _FIXTURE_OP_LOCK was "
+        "NOT held -- issue #23 regression"
+    )
+
+
+def test_unload_fixture_with_no_app_state_skips_swap_construction(
+    _fixture_op_settings_stub: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """app_state=None (e.g. a bare CLI unload) must not construct a
+    ChromaDBStore nothing would use — mirrors the equivalent guarantee
+    already covered for _rebuild_vector_state (issue #15 follow-up)."""
+    backup = _fixture_op_settings_stub.company_profile_path.parent / "_user_backup"
+    backup.mkdir(parents=True, exist_ok=True)
+    (backup / "profile.yaml").write_text("name: ''\n")
+    monkeypatch.setattr(
+        fixture_loader, "_apply_state_from_source",
+        lambda src, st: _async_result({"restored": True}),
+    )
+
+    constructed: list[Any] = []
+    original_init = ChromaDBStore.__init__
+
+    def _tracking_init(self: Any, *a: Any, **k: Any) -> None:
+        constructed.append(self)
+        original_init(self, *a, **k)
+
+    with patch.object(ChromaDBStore, "__init__", _tracking_init):
+        asyncio.run(fixture_loader.unload_fixture(_fixture_op_settings_stub))
+
+    assert constructed == []
 
 
 # --------------------------------------------------------------------------- #
