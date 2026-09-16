@@ -562,6 +562,39 @@ knowledge:
         (unreviewed, multi-writer …)" section ranked BELOW curated company
         documents and above recent research. Manual: `openexecutive
         sync-notion` / `openexecutive purge-notion`.
+    - name: ATTACHMENT_UPLOADS
+      what: |
+        Files sent as attachments to bot integrations — Discord, Telegram,
+        web-chat upload (ChromaDB collection `attachment_uploads`, issue
+        #25). Kept SEPARATE from COMPANY for the same reason as
+        NOTION_WIKI: any rostered/authorized sender can put text here via a
+        bot, not just an admin curating /documents, so it is at least as
+        multi-writer and unreviewed as a Notion share. Each chunk carries
+        `type=attachment` and a numeric `ingested_at` unix-epoch timestamp
+        (server-set, never attacker-influenced) — see `ingest_file` in
+        knowledge/loader.py. At retrieval the retriever queries this
+        collection UNSCOPED (never domain-filtered — chunks are tagged
+        domain=`company_docs`, which matches no real domain, so a
+        domain-scoped query would silently return zero rows) and appends
+        it under a clearly-labelled "Uploaded attachments (unreviewed …)"
+        section ranked BELOW curated company documents, through the same
+        `_format_untrusted_wiki` heading-spoofing neutralization as
+        NOTION_WIKI. Wiped per-company on fixture load/unload, factory
+        reset, and client-slot switch (`ChromaDBStore.delete_attachment_docs()`)
+        — except a background ingest task still writing when the switch
+        fires, a pre-existing race tracked as issue #26. Growth is bounded
+        by a daily `attachment_retention_sweep` heartbeat (see
+        `scheduler:` → `kinds`) that expires chunks past
+        ATTACHMENT_RETENTION_DAYS (default 90), plus an admin-triggered
+        `DELETE /knowledge/attachments` full wipe for immediate
+        remediation — no filtered per-upload delete exists (issue #22's
+        deliberate anti-collision design left no stable per-upload id to
+        filter on). Attachment chunks ingested before this fix that are
+        still sitting untagged in COMPANY are unreachable by either
+        mechanism — no automated migration is possible, they're
+        schema-identical to curated docs. Also searchable via
+        `/knowledge/search`'s `attachment` bucket (unscoped, same reason
+        as retrieval).
     - name: FAILURES
       what: Recorded failure cases used to teach specialists what to avoid.
     - name: RECENT_RESEARCH
@@ -1106,6 +1139,7 @@ scheduler:
     - "external_monitor_scan — heartbeat owned by the external-condition monitoring layer. Default every 5 min via EXTERNAL_MONITOR_SCAN_INTERVAL_MINUTES. The runner calls `monitoring.pipeline.run_external_monitor_scan()` which walks enabled watchlist rows whose `last_polled_at` is stale enough, fires the matching adapter (vendor_status, rss, stock, the billed standing-query `query` adapter, the `edgar` SEC-filings adapter, and the stateful `page_watch` change-detector), enriches promotable signals with capture-time relevance, writes `external_signals` rows, and promotes qualifying signals into the alerts pipeline. Bypasses outbound dispatch (channel=`__internal__`, channel_ref=`external_monitor`). Chains the next tick via `enqueue_next_external_monitor_scan` after firing — same idempotent / crash-resilient pattern as `nudge_scan`."
     - "watchlist_research_scan — periodic cron for the executive_research workflow (default every 120 min via WATCHLIST_RESEARCH_INTERVAL_MINUTES). The handler short-circuits when the company profile / initiatives / watchlist haven't changed since the last successful run, so quiet days cost zero tokens — except that a staleness floor (WATCHLIST_RESEARCH_MAX_STALENESS_HOURS, default 24) forces a run once that long has elapsed since the last successful run, so a static internal state can't keep the council blind to external change indefinitely. Does NOT write its own Alert — the workflow's Executive synthesis step routes findings directly via DMs / send_department_message / create_alert / add_watchlist_entry, so a separate cron Alert would duplicate the briefing. After routing, a DEDICATED watchlist-analysis pass (its own budget, separate from the routing budget) explicitly decides which findings are ongoing monitorable conditions and calls add_watchlist_entry for each; the run's markdown artifact is also persisted into the separate `recent_research` knowledge collection (keep-latest) so future runs + chat can recall it. The cron's only side-effects on success are the audit row (`watchlist_research_periodic_ran`) and whatever routing tools the synthesis fired. The scheduled-action kind keeps the legacy `watchlist_research_scan` name (matched by the env var WATCHLIST_RESEARCH_INTERVAL_MINUTES + the three audit event_types) even though the workflow itself is registered as `executive_research` — naming is mixed intentionally to avoid a migration on already-pending heartbeat rows. Bypasses outbound dispatch (channel=`__internal__`, channel_ref=`watchlist_research`)."
     - "notion_sync_scan — optional heartbeat (NOTION_SYNC_ENABLED, default off) that incrementally re-indexes Notion pages shared with an internal integration into the isolated `notion_wiki` collection (NOT COMPANY — synced pages are multi-writer and unreviewed). Interval NOTION_SYNC_INTERVAL_MINUTES (default 60). Caps ingest per tick via NOTION_MAX_PAGES_PER_SCAN; overflow is retried and the watermark does not advance past failed or uningested pages. Each tick reconciles: un-shared/deleted pages have files + chunks purged. Bypasses outbound dispatch (channel=`__internal__`, channel_ref=`notion_sync`). Chains the next tick via enqueue_next_notion_sync_scan. See knowledge.collections NOTION_WIKI."
+    - "attachment_retention_sweep — heartbeat (issue #25 step 2; ATTACHMENT_RETENTION_SWEEP_ENABLED, default on) owned by `knowledge.attachment_retention`. Interval ATTACHMENT_RETENTION_SWEEP_INTERVAL_MINUTES (default 1440 = daily). Each tick calls `ChromaDBStore.purge_expired_attachments(cutoff)` to expire `attachment_uploads` chunks older than ATTACHMENT_RETENTION_DAYS (default 90). Like every kind riding on this scheduler, only actually fires when BACKGROUND_JOBS_ENABLED=true (see `runner:` above). Bypasses outbound dispatch (channel=`__internal__`, channel_ref=`attachment_retention`). Chains the next tick via `enqueue_next_attachment_retention_sweep`. See `knowledge.collections` ATTACHMENT_UPLOADS."
   channel_routing: |
     The delivery channel is stored ON the scheduled_actions row itself
     (the `channel` and `channel_ref` columns). The runner dispatches
@@ -2427,13 +2461,21 @@ integrations:
     into another's context — except a background ingest task that's still
     extracting/writing when the switch fires: it isn't synchronized with
     the wipe and can land content in the wrong company (tracked as issue
-    #26, not yet closed). No purge/retention mechanism exists yet
-    within a single company's attachment history — a re-sent attachment
-    still accumulates a fresh chunk set rather than deduping (tracked as
-    issue #25 step 2, deliberately deferred). Per-file cap 20 MB;
-    extracted text truncated to 40 000 chars. Web chat exposes this
-    through ``POST /chat/upload`` (multipart) — capped at 5 files per
-    turn.
+    #26, not yet closed). Re-sent attachments still accumulate a fresh
+    chunk set rather than deduping (issue #22's deliberate anti-collision
+    design — no stable per-upload id), but growth is now bounded: issue
+    #25 step 2 adds a daily retention sweep (see ``scheduler:`` →
+    ``attachment_retention_sweep``) that expires chunks past
+    ATTACHMENT_RETENTION_DAYS, plus ``DELETE /knowledge/attachments``
+    for immediate on-demand remediation (same auth as every other
+    mutating route; wipes the whole collection, since no stable
+    per-upload id survives to support a filtered delete). Neither
+    mechanism can reach attachment chunks ingested before this fix that
+    are still sitting untagged in ``company_docs`` — no automated
+    migration is possible, they're schema-identical to curated docs.
+    Per-file cap 20 MB; extracted text truncated to 40 000 chars. Web
+    chat exposes ingest through ``POST /chat/upload`` (multipart) —
+    capped at 5 files per turn.
 
     ``build_attachment_output()``/``process_attachments()`` take a
     required ``authorized: bool`` (issue #21 — no default, so every call

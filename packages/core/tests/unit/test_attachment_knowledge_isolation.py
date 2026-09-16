@@ -1,13 +1,16 @@
-"""Regression tests for issue #25 step 1: attachment-ingested content must
-be isolated from curated ``/documents`` uploads — its own ChromaDB
+"""Regression tests for issue #25: attachment-ingested content must be
+isolated from curated ``/documents`` uploads — its own ChromaDB
 collection, its own (lower-trust) retriever presentation, and its own
 wipe-on-company-switch handling so it doesn't silently bleed into a newly
 loaded fixture/client the way it would if it still lived in
-COMPANY_COLLECTION.
+COMPANY_COLLECTION (step 1). Also covers the ``ingested_at`` metadata
+step 1 laid down for step 2's retention sweep — see
+test_attachment_retention.py for the sweep/purge logic itself.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -363,6 +366,50 @@ def test_ingest_file_does_not_tag_company_collection_chunks(tmp_path: Path) -> N
     chunks = store.collections[ChromaDBStore.COMPANY_COLLECTION]
     assert chunks, "expected at least one indexed chunk"
     assert all("type" not in c["metadata"] for c in chunks)
+
+
+# --------------------------------------------------------------------------- #
+# knowledge/loader.py — ingested_at metadata (issue #25 step 2)
+# --------------------------------------------------------------------------- #
+
+def test_ingest_file_sets_numeric_ingested_at_for_attachment_collection(
+    tmp_path: Path,
+) -> None:
+    from openexecutive.knowledge.loader import ingest_file
+
+    path = tmp_path / "notes.md"
+    path.write_text("some real attachment content here", encoding="utf-8")
+    store = FakeStore()
+
+    before = time.time()
+    asyncio.run(ingest_file(path, store, collection=ChromaDBStore.ATTACHMENT_COLLECTION))
+    after = time.time()
+
+    chunks = store.collections[ChromaDBStore.ATTACHMENT_COLLECTION]
+    assert chunks, "expected at least one indexed chunk"
+    for c in chunks:
+        ingested_at = c["metadata"].get("ingested_at")
+        assert isinstance(ingested_at, float), (
+            f"ingested_at must be a numeric epoch float (ChromaDB's $lt/$gt "
+            f"where-filters need a numeric type), got {type(ingested_at)}"
+        )
+        assert before <= ingested_at <= after
+
+
+def test_ingest_file_does_not_set_ingested_at_for_company_collection(
+    tmp_path: Path,
+) -> None:
+    from openexecutive.knowledge.loader import ingest_file
+
+    path = tmp_path / "policy.md"
+    path.write_text("curated company policy text", encoding="utf-8")
+    store = FakeStore()
+
+    asyncio.run(ingest_file(path, store))  # default collection=COMPANY_COLLECTION
+
+    chunks = store.collections[ChromaDBStore.COMPANY_COLLECTION]
+    assert chunks, "expected at least one indexed chunk"
+    assert all("ingested_at" not in c["metadata"] for c in chunks)
 
 
 # --------------------------------------------------------------------------- #

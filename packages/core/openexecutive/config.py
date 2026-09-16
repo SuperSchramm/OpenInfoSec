@@ -695,6 +695,24 @@ class Settings(BaseSettings):
         24, alias="WATCHLIST_RESEARCH_MAX_STALENESS_HOURS"
     )
 
+    # Attachment retention sweep (issue #25 step 2). Attachment-ingested
+    # content (ChromaDBStore.ATTACHMENT_COLLECTION) has no dedup and no
+    # per-item purge path otherwise -- a re-sent attachment just
+    # accumulates a fresh chunk set forever. This flag defaults True, but
+    # the sweep rides on the same scheduler heartbeat as every other
+    # scheduled_actions kind, which only runs when BACKGROUND_JOBS_ENABLED
+    # is also true (default False, see above) -- this flag alone does not
+    # make the sweep fire in a stock deployment.
+    attachment_retention_sweep_enabled: bool = Field(
+        True, alias="ATTACHMENT_RETENTION_SWEEP_ENABLED"
+    )
+    attachment_retention_days: int = Field(
+        90, ge=1, alias="ATTACHMENT_RETENTION_DAYS"
+    )
+    attachment_retention_sweep_interval_minutes: int = Field(
+        1440, ge=1, alias="ATTACHMENT_RETENTION_SWEEP_INTERVAL_MINUTES"
+    )
+
     # Notion → isolated wiki-collection sync. OFF by default. When on, a
     # scheduler heartbeat incrementally re-indexes pages shared with the
     # Notion internal integration into the NOTION Chroma collection (not

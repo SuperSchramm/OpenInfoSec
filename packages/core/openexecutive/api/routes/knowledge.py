@@ -677,3 +677,36 @@ async def search_knowledge(
         external=external_hits,
         attachment=attachment_hits,
     )
+
+
+class AttachmentPurgeResponse(BaseModel):
+    purged: int
+
+
+@router.delete("/attachments", response_model=AttachmentPurgeResponse)
+async def purge_attachments(request: Request) -> AttachmentPurgeResponse:
+    """Immediately wipe the ENTIRE ATTACHMENT_COLLECTION (issue #25 step 2)
+    — every attachment chunk from every sender, not a targeted delete.
+
+    The periodic retention sweep (knowledge/attachment_retention.py) closes
+    the unbounded-growth half of #25 on a schedule; this route is the other
+    half — immediate remediation when an operator wants attachment content
+    gone now rather than waiting out the retention window. Same auth as
+    every other mutating route here: the app-wide shared-secret middleware
+    (this path is not in api/main.py's _UNAUTHENTICATED_PATHS allowlist).
+
+    Full-collection wipe, not a filtered delete — matches
+    ChromaDBStore.delete_attachment_docs()'s existing (issue #25 step 1)
+    semantics, used identically at fixture/reset/client-switch boundaries.
+    There is no per-document attachment purge today (no stable per-upload
+    identifier survives the deliberate anti-collision chunk-id design from
+    issue #22), so this cannot target one bad upload without also removing
+    every other attachment currently indexed — only "purge everything" or
+    "wait for the TTL."
+    """
+    from openexecutive.knowledge.store import ChromaDBStore
+
+    store = _get_store(request)
+    purged = store.get_collection_count(ChromaDBStore.ATTACHMENT_COLLECTION)
+    store.delete_attachment_docs()
+    return AttachmentPurgeResponse(purged=purged)

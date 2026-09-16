@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeStore(ABC):
@@ -178,3 +181,46 @@ class ChromaDBStore(KnowledgeStore):
         with contextlib.suppress(Exception):
             self._client.delete_collection(self.ATTACHMENT_COLLECTION)
         self._get_or_create_collection(self.ATTACHMENT_COLLECTION)
+
+    def purge_expired_attachments(self, cutoff_epoch: float) -> int:
+        """Delete attachment chunks whose ``ingested_at`` is older than
+        ``cutoff_epoch`` (a unix-epoch float — see ``knowledge/loader.py``'s
+        ``ingest_file``). Returns the number of chunks deleted.
+
+        Unlike ``delete_attachment_docs()`` (a full-collection wipe used at
+        company-switch boundaries), this is the issue #25 step 2 retention
+        sweep: a partial, age-based purge that runs on a schedule
+        (``knowledge/attachment_retention.py``) independent of any company
+        switch. ``ingested_at`` is server-set at ingest time, never
+        attacker-influenced, so there is no way for hostile content to
+        forge itself a longer retention window.
+
+        Chunks predating this fix have no ``ingested_at`` key at all (see
+        ``ingest_file``'s docstring on why that can't be retroactively
+        fixed) — Chroma's ``where`` comparison operators only match rows
+        that HAVE the field, so those rows are silently skipped by this
+        sweep rather than raising or being misinterpreted as "always
+        expired." They remain reachable only via ``delete_attachment_docs()``
+        or ``delete_company_docs()`` (wherever they actually live).
+        """
+        try:
+            col = self._get_or_create_collection(self.ATTACHMENT_COLLECTION)
+            where = {"ingested_at": {"$lt": cutoff_epoch}}
+            matches = col.get(where=where, include=[])
+            ids = matches.get("ids") or []
+            if not ids:
+                return 0
+            col.delete(ids=ids)
+            return len(ids)
+        except Exception:
+            # Unlike this file's other best-effort deletes (delete_documents,
+            # collection_exists, get_collection_count), a silent failure here
+            # is indistinguishable from "nothing was expired this tick" —
+            # both report 0. For a control whose whole job is guaranteeing
+            # deletion, that's the wrong failure mode: a permanently broken
+            # sweep would look identical to a healthy one with nothing to do
+            # (round-2 security review). Log loudly; still return 0 rather
+            # than raise, so one bad tick can't crash the scheduler loop —
+            # the next tick just retries against the same cutoff.
+            logger.exception("attachment_retention.purge_expired_attachments: failed")
+            return 0

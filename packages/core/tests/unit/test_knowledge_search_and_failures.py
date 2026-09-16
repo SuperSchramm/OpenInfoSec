@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -267,3 +267,55 @@ def test_failures_rejects_path_traversal(client: TestClient) -> None:
     # The path-segment regex requires a *.md and no slashes/dots-as-traversal,
     # so the encoded "../evil.md" must be rejected as a bad filename.
     assert res.status_code in (400, 404)
+
+
+# --------------------------------------------------------------------------- #
+# DELETE /knowledge/attachments — manual admin purge (issue #25 step 2)
+# --------------------------------------------------------------------------- #
+
+def test_purge_attachments_requires_shared_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same auth model as every other mutating route in this API: the
+    app-wide shared-secret middleware. Mirrors test_mcp_server.py's
+    test_mcp_endpoint_is_gated_by_shared_secret — routing only, lifespan is
+    not run, so no DB/store setup is needed for this check."""
+    monkeypatch.setenv("BACKEND_SHARED_SECRET", "testsecret")
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    app = create_app()
+    test_client = TestClient(app)  # not a context manager → lifespan does not run
+
+    no_key = test_client.delete("/knowledge/attachments", follow_redirects=False)
+    assert no_key.status_code == 401
+
+    with_key = test_client.delete(
+        "/knowledge/attachments",
+        headers={"x-api-key": "testsecret"},
+        follow_redirects=False,
+    )
+    assert with_key.status_code != 401
+
+
+def test_purge_attachments_wipes_collection_and_returns_count(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for issue #25 step 2 logic review round 2: must
+    count BEFORE deleting, not after — a delete-then-count order would
+    always report 0 against a real store, since the collection is already
+    gone by the time the count runs. assert_has_calls(..., any_order=False)
+    pins both the calls AND their order in one standard-library assertion."""
+    fake_store = MagicMock()
+    fake_store.get_collection_count.return_value = 7
+    monkeypatch.setattr(
+        "openexecutive.api.routes.knowledge._get_store",
+        lambda _request: fake_store,
+    )
+
+    res = client.delete("/knowledge/attachments")
+
+    assert res.status_code == 200
+    assert res.json() == {"purged": 7}
+    fake_store.assert_has_calls(
+        [call.get_collection_count("attachment_uploads"), call.delete_attachment_docs()],
+        any_order=False,
+    )

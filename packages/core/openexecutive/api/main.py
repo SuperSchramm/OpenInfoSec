@@ -173,11 +173,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "BACKGROUND_JOBS_ENABLED is off (default) -- the scheduler "
             "dispatcher and email poller will NOT start this process, so "
             "department cadences, principal briefs, proactive nudges, "
-            "external monitoring, watchlist research, and inbound email "
-            "are all paused. Setting BACKGROUND_JOBS_ENABLED=true also "
-            "requires SCHEDULER_ENABLED=true (scheduler) and MCP_ENABLED="
-            "true (email) to actually take effect. (The WaitForHuman "
-            "resumer is unaffected -- it always runs, including its own "
+            "external monitoring, watchlist research, Notion sync, "
+            "attachment retention sweeps, and inbound email are all "
+            "paused. Setting BACKGROUND_JOBS_ENABLED=true also requires "
+            "SCHEDULER_ENABLED=true (scheduler) and MCP_ENABLED=true "
+            "(email) to actually take effect. (The WaitForHuman resumer "
+            "is unaffected -- it always runs, including its own "
             "on_timeout enforcement on approval gates.)"
         )
 
@@ -276,6 +277,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.notion_sync_enabled:
         from openexecutive.knowledge.notion_sync import bootstrap_notion_sync_scan
         bootstrap_notion_sync_scan()
+
+    # Attachment retention sweep (issue #25 step 2) — periodic expiry of
+    # ATTACHMENT_COLLECTION chunks. Same shape as notion_sync above; this
+    # flag defaults True, but the bootstrap call below is a no-op unless
+    # BACKGROUND_JOBS_ENABLED is also true (see the warning above and
+    # config.py's comment on this flag) -- it doesn't run unattended by
+    # itself.
+    if settings.attachment_retention_sweep_enabled:
+        from openexecutive.knowledge.attachment_retention import (
+            bootstrap_attachment_retention_sweep,
+        )
+        bootstrap_attachment_retention_sweep()
 
     audit_logger = AuditLogger()
     app.state.audit = audit_logger

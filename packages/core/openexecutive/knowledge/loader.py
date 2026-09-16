@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -243,8 +244,17 @@ async def ingest_file(
     # automated remediation) — this is defense-in-depth for every
     # ATTACHMENT_COLLECTION write from here on, mirroring how Notion
     # content already carries ``type="notion"`` for the same reason.
+    # ingested_at (issue #25 step 2): a numeric unix-epoch float, not an
+    # ISO string -- ChromaDB's where-filter $lt/$gt comparisons need a
+    # numeric metadata type (verified directly against a live collection
+    # before choosing this). Server-set at ingest time, never derived from
+    # anything attacker-supplied (unlike display_name/filename), so it
+    # can't be used to forge a longer retention window for hostile
+    # content. Powers attachment_retention.py's periodic expiry sweep.
     extra_metadata: dict[str, Any] = (
-        {"type": "attachment"} if collection == ChromaDBStore.ATTACHMENT_COLLECTION else {}
+        {"type": "attachment", "ingested_at": time.time()}
+        if collection == ChromaDBStore.ATTACHMENT_COLLECTION
+        else {}
     )
 
     texts = chunks

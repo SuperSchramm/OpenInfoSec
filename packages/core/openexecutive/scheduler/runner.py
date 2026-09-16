@@ -568,6 +568,40 @@ async def _execute_action(
         return
 
     # ------------------------------------------------------------------
+    # Attachment retention sweep (issue #25 step 2) — deletes attachment
+    # chunks older than settings.attachment_retention_days from the
+    # isolated ATTACHMENT_COLLECTION. Same heartbeat shape as
+    # notion_sync_scan directly above.
+    # ------------------------------------------------------------------
+    if action.kind == "attachment_retention_sweep":
+        from openexecutive.knowledge.attachment_retention import (
+            enqueue_next_attachment_retention_sweep,
+            run_attachment_retention_sweep,
+        )
+        try:
+            stats = await run_attachment_retention_sweep(now=now)
+            logger.info("scheduler: attachment_retention_sweep %s", stats)
+        except Exception:
+            logger.exception(
+                "scheduler: attachment_retention_sweep (action %d) crashed", action.id
+            )
+        try:
+            mark_action_done(action.id)
+        except Exception:
+            logger.exception(
+                "scheduler: attachment_retention_sweep (action %d) — mark_done failed",
+                action.id,
+            )
+        try:
+            enqueue_next_attachment_retention_sweep(after=datetime.now(UTC))
+        except Exception:
+            logger.exception(
+                "scheduler: failed to chain next attachment_retention_sweep "
+                "heartbeat — sweep will stall until next bootstrap"
+            )
+        return
+
+    # ------------------------------------------------------------------
     # Proactive nudge — re-check reachability at dispatch time before
     # falling through to the ad-hoc dispatch path. The person may have
     # gone on leave between schedule and fire; if so, defer rather than
