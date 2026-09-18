@@ -538,7 +538,29 @@ knowledge:
         the Knowledge UI can list (GET /documents), retrieve the extracted text
         for read-only viewing (GET /documents/{filename}), and delete
         (DELETE /documents/{filename}) individual docs. Synced Notion pages
-        do NOT land here — see NOTION_WIKI.
+        do NOT land here — see NOTION_WIKI. Each chunk carries a `domain`
+        tag (issue #29): the uploader's choice, else -- for a FIXTURE load
+        only (`ingest_file(honor_front_matter=True)`, opt-in and off
+        everywhere else) -- a `domain:` declared in a markdown doc's
+        front-matter, else inferred from a domain directory in the path, else
+        "general". Front-matter is document content, so it is never honored
+        for uploads, attachments, client-switch re-ingest or restore-from-
+        backup: it must not let a doc's own body re-tag what an admin chose or
+        let a sender pick their own tag. "general" means not specific to one
+        domain: a specialist's COMPANY query is scoped to its own domains PLUS
+        "general" (`retriever._with_general`, also applied by the
+        `/knowledge/search` diagnostic so it agrees with chat), so an untagged
+        company doc is visible to every specialist. Before that, "general"
+        docs were reachable only through the Executive's own unscoped query --
+        specialists never saw the company's own policies. NOTION_WIKI and
+        BUILTIN are deliberately NOT widened (Notion is multi-writer and
+        unreviewed, and a page whose title has no domain keyword falls back to
+        "general" -- a writer could otherwise put it in front of every
+        specialist just by titling it blandly); they keep strict scoping. A
+        front-matter tag applies at fixture-load time only; a later re-index of
+        the active docs dir without a fixture load (e.g. a client-slot
+        rebuild) re-tags from the path, i.e. "general" -- drift is always
+        toward more visibility, never toward hiding a doc.
     - name: NOTION_WIKI
       what: |
         Synced Notion wiki pages (ChromaDB collection `notion_wiki`). Kept

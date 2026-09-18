@@ -546,7 +546,7 @@ async def search_knowledge(
     `retrieve()` produces. Intended for the Knowledge UI's Query mode and
     for tuning the knowledge base offline.
     """
-    from openexecutive.knowledge.retriever import DOMAIN_ALIASES
+    from openexecutive.knowledge.retriever import DOMAIN_ALIASES, GENERAL_DOMAIN, _with_general
     from openexecutive.knowledge.store import ChromaDBStore
 
     if not body.query.strip():
@@ -559,7 +559,7 @@ async def search_knowledge(
 
     if body.domain_filter:
         for d in body.domain_filter:
-            if d not in DOMAIN_MAP:
+            if d not in DOMAIN_MAP and d != GENERAL_DOMAIN:
                 raise HTTPException(status_code=400, detail=f"Unknown domain: {d}")
 
     if body.specialist and body.specialist not in DOMAIN_ALIASES:
@@ -570,7 +570,9 @@ async def search_knowledge(
         effective_domains = DOMAIN_ALIASES.get(body.specialist)
 
     # Reverse-map: which specialists would see at least one of these domains?
-    if effective_domains:
+    # "general" docs are visible to every specialist (issue #29), so a scope that
+    # includes it -- like no scope at all -- is seen by all of them.
+    if effective_domains and GENERAL_DOMAIN not in effective_domains:
         specialists_seeing = sorted(
             name
             for name, doms in DOMAIN_ALIASES.items()
@@ -645,9 +647,19 @@ async def search_knowledge(
 
     company_hits: list[SearchHit] = []
     if "company" in include:
-        company_hits = _hits_from_chroma(
-            _query_collection(ChromaDBStore.COMPANY_COLLECTION, n_company)
-        )
+        # Mirror retrieve(): the COMPANY query also matches "general"-tagged docs
+        # (issue #29). This endpoint exists to answer "would specialist X have
+        # seen this doc?" -- it must not disagree with the chat path.
+        try:
+            company_raw = store.query(
+                query_text=body.query,
+                collection=ChromaDBStore.COMPANY_COLLECTION,
+                domain_filter=_with_general(effective_domains),
+                n_results=n_company,
+            )
+        except Exception:
+            company_raw = []
+        company_hits = _hits_from_chroma(company_raw)
 
     failure_hits: list[SearchHit] = []
     if "failures" in include:

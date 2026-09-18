@@ -8,6 +8,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from openexecutive.knowledge.store import ChromaDBStore
 
 logger = logging.getLogger(__name__)
@@ -174,6 +176,80 @@ def _sanitize_display_name(raw: str) -> str:
     return (name or "unnamed")[:_MAX_DISPLAY_NAME_CHARS]
 
 
+# Real front-matter is a handful of short lines. A larger block is not
+# front-matter worth parsing: it is left alone rather than handed to the YAML
+# parser (see the RecursionError note in _split_front_matter_domain). 1024 is
+# measured, not arbitrary: worst-case nested-flow input costs ~0.045s to fail
+# at this size but ~0.4s at 2048+, which across a fixture of many docs would
+# stall a load that runs after the collection has already been wiped.
+_MAX_FRONT_MATTER_CHARS = 1024
+
+_FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+
+# Domains a company doc may be declared under. "general" = not specific to one
+# domain (visible to every specialist -- see retriever._with_general); "talent"
+# is accepted for COMPANY docs even though BUILTIN has no such subtree.
+_DECLARABLE_DOMAINS = frozenset({*DOMAIN_MAP.values(), "general", "talent"})
+
+
+def _split_front_matter_domain(text: str, name: str) -> tuple[str | None, str]:
+    """Return ``(declared_domain, text_without_front_matter)``.
+
+    A markdown doc may open with a front-matter block carrying ``domain:
+    <name>`` (issue #29) so its author -- e.g. a fixture -- can say which
+    specialists' retrieval it belongs to, instead of relying on the on-disk
+    path (``company/docs/*.md`` has no domain segment, so path inference
+    yields "general"). Only called when the caller has opted in
+    (``ingest_file(honor_front_matter=True)``); the block is metadata, not
+    content, and is stripped only when it declares a ``domain`` key, so a doc
+    with unrelated front-matter is indexed exactly as before. An unknown or
+    non-string domain is ignored with a warning (the doc still indexes, as
+    "general"), never guessed at -- a typo must not silently hide a doc behind
+    a domain no specialist queries.
+
+    Never raises: this runs inside loops (fixture load, client switch) that
+    have already wiped the collection, so one hostile file must not be able to
+    abort the re-index. ``yaml.safe_load`` can raise more than ``YAMLError``
+    (deeply nested flow collections raise ``RecursionError``), hence the broad
+    ``except``, plus a size bound so a huge block is never parsed at all.
+    """
+    # A UTF-8 BOM survives ``read_text(encoding="utf-8")`` (Windows Notepad
+    # writes one) and would otherwise defeat the ``\A---`` anchor.
+    probe = text[1:] if text.startswith("\ufeff") else text
+    match = _FRONT_MATTER.match(probe)
+    if not match:
+        return None, text
+    if len(match.group(1)) > _MAX_FRONT_MATTER_CHARS:
+        # Left unstripped and unparsed, so it indexes as ordinary content under
+        # "general" -- but say so: the author asked for a domain and didn't get it.
+        logger.warning(
+            "ingest_file: front-matter block in %s is over %d chars -- not parsed, "
+            "doc indexed as-is",
+            _sanitize_display_name(name), _MAX_FRONT_MATTER_CHARS,
+        )
+        return None, text
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except Exception:  # noqa: BLE001 -- see the docstring: must never raise
+        logger.warning(
+            "ingest_file: front-matter in %s is not valid YAML -- ignored, doc "
+            "indexed as-is",
+            _sanitize_display_name(name),
+        )
+        return None, text
+    if not isinstance(meta, dict) or "domain" not in meta:
+        return None, text
+    remainder = probe[match.end():]
+    declared = meta["domain"]
+    if isinstance(declared, str) and declared.strip().lower() in _DECLARABLE_DOMAINS:
+        return declared.strip().lower(), remainder
+    logger.warning(
+        "ingest_file: ignoring front-matter domain %r in %s -- not one of %s",
+        declared, _sanitize_display_name(name), sorted(_DECLARABLE_DOMAINS),
+    )
+    return None, remainder
+
+
 async def ingest_file(
     path: Path,
     store: ChromaDBStore,
@@ -182,6 +258,7 @@ async def ingest_file(
     *,
     display_name: str | None = None,
     expected_generation: int | None = None,
+    honor_front_matter: bool = False,
 ) -> int:
     """Extract, chunk, and upsert one file's text into ``collection``.
 
@@ -263,12 +340,37 @@ async def ingest_file(
     nothing was written, when the two are unrelated. Callers that ingest
     synchronously in the same request/turn that reads ``store`` have no
     such window and leave this ``None``, so they never see ``-1``.
+
+    Domain resolution (issue #29): an explicit ``domain`` argument wins; else,
+    if the caller passed ``honor_front_matter=True``, for a ``.md`` file, a
+    ``domain:`` declared in its front-matter (see
+    ``_split_front_matter_domain``); else the path-based inference, which
+    falls back to "general" (visible to every specialist).
+
+    ``honor_front_matter`` is opt-in and off by default, and only the fixture
+    loader turns it on. Front-matter is document CONTENT, so honoring it
+    wherever a doc is re-read would let its author override the tag an admin
+    chose at upload (``/documents`` passes an explicit domain; the same file
+    re-ingested on a client switch would then be re-tagged by its own body),
+    and would let a sender pick their own tag. A fixture is chosen by an
+    operator and loaded as a set (a *generated* fixture is model-authored, but
+    goes through a review step before it is saved), which is the one place an
+    author-declared tag is wanted.
+
+    A declared tag applies at fixture-load time only. Anything that later
+    re-indexes the active docs directory without a fixture load (e.g. a
+    client-slot rebuild) tags each doc from its path again -- "general", which
+    every specialist can see -- so the drift is always in the permissive
+    direction, never toward hiding a doc.
     """
     text = extract_text_from_file(path)
+    declared_domain: str | None = None
+    if honor_front_matter and domain is None and path.suffix.lower() == ".md":
+        declared_domain, text = _split_front_matter_domain(text, path.name)
     if not text.strip():
         return 0
 
-    inferred_domain = domain or infer_domain_from_path(path)
+    inferred_domain = domain or declared_domain or infer_domain_from_path(path)
     chunks = chunk_text(text, chunk_size=512, overlap=50)
 
     name = _sanitize_display_name(display_name) if display_name else path.name

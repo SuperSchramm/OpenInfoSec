@@ -46,6 +46,34 @@ def _format_untrusted_wiki(text: str) -> str:
     return "\n".join(f"· {line}" for line in cleaned.splitlines())
 
 
+GENERAL_DOMAIN = "general"
+
+
+def _with_general(domains: list[str] | None) -> list[str] | None:
+    """Widen a domain scope so a doc tagged ``"general"`` matches too.
+
+    ``"general"`` is what ingest falls back to when nothing says otherwise --
+    a default ``/documents`` upload, a fixture doc with no domain segment in
+    its path. It means "not specific to one domain", i.e. relevant to every
+    specialist. Before this, every specialist's domain-scoped query excluded
+    it, so those docs were reachable only through the Executive's own
+    unscoped query (issue #29). ``None`` stays ``None``: an unscoped query
+    already sees everything.
+
+    Applied to the COMPANY collection ONLY -- curated by an admin. Deliberately
+    NOT applied to NOTION: a Notion share is multi-writer and unreviewed, and
+    ``notion_sync.infer_domain`` falls back to "general" whenever a page's
+    *title* has no domain keyword, so a writer could put a page in front of
+    every specialist just by titling it blandly. Those pages keep reaching
+    only the specialists whose domain their title names. BUILTIN keeps its
+    strict scoping too (its "general" bucket is uncurated leftovers), and
+    ATTACHMENT/RESEARCH are already never domain-scoped.
+    """
+    if domains is None or GENERAL_DOMAIN in domains:
+        return domains
+    return [*domains, GENERAL_DOMAIN]
+
+
 def _passes_threshold(
     row: dict[str, Any], threshold: float = _DISTANCE_THRESHOLD
 ) -> bool:
@@ -299,7 +327,7 @@ def retrieve(
         raw_company = store.query(
             query_text=query,
             collection=ChromaDBStore.COMPANY_COLLECTION,
-            domain_filter=effective_domains,
+            domain_filter=_with_general(effective_domains),
             n_results=n_company,
         )
         company_results = [

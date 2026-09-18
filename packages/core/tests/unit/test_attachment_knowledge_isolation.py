@@ -196,8 +196,11 @@ def test_attachment_query_is_never_domain_scoped(
     # Sanity check the fixture actually exercises domain-scoping for other
     # collections, so this test isn't vacuously true for a query that never
     # domain-scopes anything.
+    # (COMPANY is scoped to the specialist's domains plus "general" -- issue #29:
+    # untagged company docs apply to every specialist. Attachments still never
+    # get a domain_filter at all, which is what this test is about.)
     company_calls = [df for coll, df in calls if coll == ChromaDBStore.COMPANY_COLLECTION]
-    assert company_calls == [["finance"]]
+    assert company_calls == [["finance", "general"]]
 
 
 def test_retriever_neutralizes_heading_spoofing_in_attachment_text(

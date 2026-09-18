@@ -297,7 +297,7 @@ async def _load_from_dir(
                 # on a truly empty environment. User can call snapshot manually.
                 pass
 
-        summary = await _apply_state_from_source(fixture_dir, settings)
+        summary = await _apply_state_from_source(fixture_dir, settings, honor_front_matter=True)
 
         # Record which fixture is active so the UI can show it and so a
         # subsequent load() knows not to take a fresh snapshot.
@@ -434,7 +434,9 @@ def _swap_shared_store(app_state: Any | None, settings: Any) -> None:
     )
 
 
-async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str, Any]:
+async def _apply_state_from_source(
+    source_dir: Path, settings: Any, *, honor_front_matter: bool = False
+) -> dict[str, Any]:
     """Apply profile.yaml + docs/ + memory.json + people.yaml + departments.yaml
     from ``source_dir`` to the live company state.
 
@@ -497,10 +499,15 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
         # ingest_file can return -1 (issue #26) when expected_generation is
         # passed and stale; += on that would silently under-report this
         # count for anyone who adds the kwarg here without also handling it.
+        # honor_front_matter (issue #29): True only for a fixture load, where the
+        # docs are authored as a set and may declare their own domain. The
+        # restore-from-backup path leaves it False so a user's own uploads are
+        # re-indexed exactly as before, not re-tagged by their own content.
         docs_indexed += await ingest_file(
             path=dest_doc,
             store=store,
             collection=ChromaDBStore.COMPANY_COLLECTION,
+            honor_front_matter=honor_front_matter,
         )
 
     # ── 4. Seed people first so episodic seeding can resolve

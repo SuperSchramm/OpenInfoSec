@@ -157,6 +157,63 @@ def test_search_specialist_filters_to_domains(client: TestClient) -> None:
     assert "cpo" not in data["specialists_that_would_see_this"]
 
 
+def _client_recording_queries(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, dict[str, Any]]:
+    seen: dict[str, Any] = {}
+
+    def fake_query(
+        query_text: str,
+        collection: str,
+        domain_filter: list[str] | None = None,
+        n_results: int = 5,
+    ) -> list[dict[str, Any]]:
+        seen[collection] = domain_filter
+        return []
+
+    store = MagicMock()
+    store.query.side_effect = fake_query
+    monkeypatch.setattr("openexecutive.api.routes.knowledge._get_store", lambda _request: store)
+    return TestClient(create_app()), seen
+
+
+def test_search_company_query_matches_general_docs_like_retrieve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #29: this endpoint answers "would specialist X have seen this doc?",
+    so its COMPANY query must apply the same "general" widening as retrieve() --
+    otherwise it says a general-tagged doc is invisible to a specialist that
+    actually receives it in chat. BUILTIN stays strictly scoped."""
+    client, seen = _client_recording_queries(monkeypatch)
+
+    res = client.post("/knowledge/search", json={"query": "incident response", "specialist": "cyberops"})
+
+    assert res.status_code == 200
+    assert seen["company_docs"] == ["security", "general"]
+    assert seen["builtin_knowledge"] == ["security"]
+
+
+def test_search_accepts_general_as_a_domain_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, seen = _client_recording_queries(monkeypatch)
+
+    res = client.post("/knowledge/search", json={"query": "anything", "domain_filter": ["general"]})
+
+    assert res.status_code == 200
+    assert seen["company_docs"] == ["general"]
+
+
+def test_search_general_scope_is_seen_by_every_specialist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A general-tagged doc is visible to every specialist in chat, so the
+    diagnostic's "who would see this?" answer must list them all -- not the
+    empty list that falls out of DOMAIN_ALIASES having no "general" key."""
+    from openexecutive.knowledge.retriever import DOMAIN_ALIASES
+
+    client, _ = _client_recording_queries(monkeypatch)
+
+    res = client.post("/knowledge/search", json={"query": "x", "domain_filter": ["general"]})
+
+    assert res.status_code == 200
+    assert res.json()["specialists_that_would_see_this"] == sorted(DOMAIN_ALIASES)
+
+
 def test_search_rejects_unknown_specialist(client: TestClient) -> None:
     res = client.post(
         "/knowledge/search", json={"query": "x", "specialist": "ghost"}

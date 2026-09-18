@@ -95,6 +95,26 @@ fixtures/companies/<name>/
     <name>_002.yaml   # Eval scenario 2
 ```
 
+### Tagging docs with a domain
+
+Specialists retrieve company docs by domain (a CISO query looks at `security` and `governance` docs, a CFO query at `finance`, and so on). A doc's tag comes from, in order:
+
+1. A `domain:` in the markdown file's front-matter. **Fixture loads only**: uploads, attachments and client-switch re-indexing never read it, because it is document content.
+2. A domain directory in its path (`.../finance/...`), which fixture docs never have.
+3. Otherwise `general`.
+
+`general` means "not specific to one domain" and is visible to **every** specialist, so an untagged doc always works. Tag a doc only when you want to *narrow* it to that domain's specialists, for example a finance-only budget memo:
+
+```markdown
+---
+domain: finance
+---
+# FY26 budget assumptions
+...
+```
+
+Allowed values: `strategy`, `finance`, `hr`, `legal`, `operations`, `marketing`, `board`, `product`, `security`, `governance`, `compliance`, `talent`, `general`. An unknown value is ignored with a warning and the doc is indexed as `general`. Each doc carries one domain, and a tagged doc is not retrieved by specialists outside that domain, so leave cross-cutting docs (an incident response plan that Legal and Security both need) untagged. A tag is applied when the fixture is loaded; if the docs are later re-indexed without a fixture load (for example a client-slot rebuild) they fall back to `general`, which every specialist can see, so the drift is always toward *more* visibility, never less. Values over 1024 characters of front-matter, or that aren't valid YAML, are ignored with a warning.
+
 ### Authoring `departments.yaml`
 
 A department can be specialist-aligned (mapped to one of the 8 specialist agents) or informational-only:

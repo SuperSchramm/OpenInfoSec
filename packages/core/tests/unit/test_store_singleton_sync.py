@@ -201,7 +201,7 @@ def test_load_fixture_any_constructs_swap_store_while_lock_held(
     monkeypatch.setattr(fixture_loader, "FIXTURES_ROOT", fixture_root)
     monkeypatch.setattr(
         fixture_loader, "_apply_state_from_source",
-        lambda src, st: _async_result({"loaded": True}),
+        lambda src, st, **kw: _async_result({"loaded": True}),
     )
 
     app_state = _AppStateStub()
