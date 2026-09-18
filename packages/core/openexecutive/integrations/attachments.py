@@ -155,12 +155,23 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
     Uses the same strong-ref pattern as ``_thread_rename_tasks`` in
     discord_bot to prevent GC cancellation mid-flight.
     """
+    from openexecutive.orchestrator.store_access import get_store_generation
+
+    # issue #26: captured HERE, synchronously, before loop.create_task(_run())
+    # below -- not inside _run() itself (a round-1 version of this fix did
+    # that, and the guard turned out to be unreachable). See ingest_file's
+    # docstring (the ``expected_generation`` parameter) for why this exact
+    # point is the one that matters.
+    expected_generation = get_store_generation()
+
     async def _run() -> None:
         suffix = _suffix_from_filename(filename)
         try:
             from openexecutive.knowledge.loader import ingest_file
             from openexecutive.knowledge.store import ChromaDBStore
-            from openexecutive.orchestrator.store_access import get_shared_store as _get_store
+            from openexecutive.orchestrator.store_access import (
+                get_shared_store as _get_store,
+            )
 
             store = _get_store()
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -189,20 +200,47 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
                 # (and therefore the "curated company doc" trust presentation)
                 # with /documents uploads — see retriever.py's attachment
                 # section and ChromaDBStore.ATTACHMENT_COLLECTION's docstring.
-                # A purge/retention path for this collection is still a known
-                # gap, deliberately deferred as issue #25 step 2.
+                # A daily retention sweep + an admin purge route (issue #25
+                # step 2) now bound this collection's growth and give
+                # on-demand remediation. expected_generation (issue #26,
+                # captured above before this task was even scheduled) guards
+                # against THIS call's write landing in the wrong company —
+                # see ingest_file's docstring for the mechanism.
                 count = await ingest_file(
                     tmp_path,
                     store,
                     domain="company_docs",
                     collection=ChromaDBStore.ATTACHMENT_COLLECTION,
                     display_name=filename,
+                    expected_generation=expected_generation,
                 )
-                logger.info(
-                    "attachments: indexed %d chunks from %s into ChromaDB",
-                    count,
-                    filename,
-                )
+                if count == -1:
+                    # ingest_file returns -1 (never for any other reason,
+                    # per its docstring) specifically for the swap-generation
+                    # race skip -- distinct from a plain 0, which means
+                    # "extracted no text". Checking the sentinel here rather
+                    # than re-deriving "did the generation change" from
+                    # get_store_generation() avoids misattributing an
+                    # empty/unreadable attachment to a race it has nothing
+                    # to do with, just because a switch happened to also run
+                    # in the same window (round-2 logic review). ingest_file
+                    # already logged a WARNING with the generation values on
+                    # a different logger; this is the human-facing summary.
+                    # %r (round-2 security review), not %s: filename comes
+                    # straight from the sender, and repr()'s escaping of
+                    # control characters keeps a \n in it from forging extra
+                    # log lines -- same reasoning as this codebase's other
+                    # %r-logged untrusted strings.
+                    logger.info(
+                        "attachments: skipped ingest for %r -- store swapped mid-ingest (issue #26)",
+                        filename,
+                    )
+                else:
+                    logger.info(
+                        "attachments: indexed %d chunks from %r into ChromaDB",
+                        count,
+                        filename,
+                    )
             finally:
                 tmp_path.unlink(missing_ok=True)
         except Exception:

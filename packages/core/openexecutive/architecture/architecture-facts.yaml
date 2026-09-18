@@ -581,8 +581,10 @@ knowledge:
         `_format_untrusted_wiki` heading-spoofing neutralization as
         NOTION_WIKI. Wiped per-company on fixture load/unload, factory
         reset, and client-slot switch (`ChromaDBStore.delete_attachment_docs()`)
-        — except a background ingest task still writing when the switch
-        fires, a pre-existing race tracked as issue #26. Growth is bounded
+        — a background ingest task still writing when the switch fires is
+        guarded by a swap-generation counter, not blocked (issue #26; see
+        the `integrations.attachments` entry above for the mechanism).
+        Growth is bounded
         by a daily `attachment_retention_sweep` heartbeat (see
         `scheduler:` → `kinds`) that expires chunks past
         ATTACHMENT_RETENTION_DAYS (default 90), plus an admin-triggered
@@ -2458,10 +2460,20 @@ integrations:
     collection alongside ``delete_company_docs()``/``delete_notion_docs()``
     on every company-switch boundary (fixture load/unload, factory reset,
     client-slot switch) so one company's attachment uploads don't survive
-    into another's context — except a background ingest task that's still
-    extracting/writing when the switch fires: it isn't synchronized with
-    the wipe and can land content in the wrong company (tracked as issue
-    #26, not yet closed). Re-sent attachments still accumulate a fresh
+    into another's context. A background ingest task that's still running
+    when the switch (or an admin purge) fires is NOT blocked or delayed by
+    a lock — issue #26 instead guards it with a monotonically increasing
+    swap-generation counter (``orchestrator.store_access``), bumped on
+    every company switch and every admin purge. ``_schedule_ingest()``
+    captures the generation synchronously before the background task is
+    even scheduled, and ``ingest_file()`` re-checks it immediately before
+    the write; a mismatch skips the write (logged, not raised) rather than
+    landing in whatever now lives under the collection name. The capture
+    point (before scheduling, not after) is deliberate and is documented
+    in-line at both call sites — a round-1 version of this fix captured
+    too late and the guard was provably unreachable; see
+    ``integrations/attachments.py``'s ``_schedule_ingest`` and
+    ``knowledge/loader.py``'s ``ingest_file`` docstring for why. Re-sent attachments still accumulate a fresh
     chunk set rather than deduping (issue #22's deliberate anti-collision
     design — no stable per-upload id), but growth is now bounded: issue
     #25 step 2 adds a daily retention sweep (see ``scheduler:`` →

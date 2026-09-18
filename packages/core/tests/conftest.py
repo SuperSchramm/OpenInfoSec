@@ -35,3 +35,17 @@ def reset_active_store():
     set_store(None)
     yield
     set_store(None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_store_generation():
+    """Isolate the process-wide swap-generation counter (issue #26) between
+    tests. Mirrors reset_active_gateway/reset_active_store above -- without
+    this, a test asserting an absolute generation value would be
+    order-dependent on every other test in the session that also calls
+    publish_swapped_store()/delete_attachment_docs()/bump_store_generation()."""
+    from openexecutive.orchestrator import store_access
+
+    store_access._reset_store_generation_for_tests()
+    yield
+    store_access._reset_store_generation_for_tests()

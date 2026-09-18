@@ -175,9 +175,27 @@ class ChromaDBStore(KnowledgeStore):
         that clear company state on a company switch (fixture load/unload,
         factory reset, client-slot rebuild) must clear this alongside
         ``delete_company_docs()`` or a previous company's attachment
-        uploads would silently survive into the new one."""
+        uploads would silently survive into the new one.
+
+        Also bumps the swap generation (issue #26) as its FIRST action, not
+        after: unlike the other two callers (company switches, which already
+        bump it via ``publish_swapped_store``), the admin-triggered manual
+        purge route (``DELETE /knowledge/attachments``) calls this directly
+        without a store swap. Without this bump, a background attachment
+        ingest task scheduled just before this purge runs could still land
+        its write after the purge completes, silently defeating the purge's
+        "gone now" intent -- the exact same race this issue closed for
+        company switches, just triggered by a different caller. Bumping
+        first (security review round 2) rather than after the collection is
+        rebuilt means the guard is armed even if ``_get_or_create_collection``
+        below raises after a successful delete -- a partially-failed purge
+        still disarms every in-flight ingest's stale write, not just a
+        cleanly-completed one."""
         import contextlib
 
+        from openexecutive.orchestrator.store_access import bump_store_generation
+
+        bump_store_generation()
         with contextlib.suppress(Exception):
             self._client.delete_collection(self.ATTACHMENT_COLLECTION)
         self._get_or_create_collection(self.ATTACHMENT_COLLECTION)

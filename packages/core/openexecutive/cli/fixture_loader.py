@@ -475,8 +475,9 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
     # docs so a completed switch doesn't leave a prior company's
     # attachment content readable in the new one. A late-finishing
     # background ingest task can still race a switch that starts
-    # mid-upload — pre-existing gap, tracked separately as issue #26, not
-    # closed by this call.
+    # mid-upload; delete_attachment_docs() below bumps the swap-generation
+    # counter (issue #26) so such a task's own generation check catches
+    # the switch and skips its write instead of landing here.
     store.delete_attachment_docs()
     # Recent-research artifacts are per-company; never let a new company
     # inherit the prior company's research.
@@ -491,6 +492,11 @@ async def _apply_state_from_source(source_dir: Path, settings: Any) -> dict[str,
 
     docs_indexed = 0
     for dest_doc in sorted(company_docs_dir.glob("*.md")):
+        # No expected_generation here (this loop IS the synchronous
+        # write, not a background task racing one) -- keep it that way.
+        # ingest_file can return -1 (issue #26) when expected_generation is
+        # passed and stale; += on that would silently under-report this
+        # count for anyone who adds the kwarg here without also handling it.
         docs_indexed += await ingest_file(
             path=dest_doc,
             store=store,
@@ -698,8 +704,9 @@ async def reset_all_state(
         # company docs so a completed switch doesn't leave a prior
         # company's attachment content readable in the new one. A
         # late-finishing background ingest task can still race a switch
-        # that starts mid-upload — pre-existing gap, tracked separately as
-        # issue #26, not closed by this call.
+        # that starts mid-upload; delete_attachment_docs() below bumps the
+        # swap-generation counter (issue #26) so such a task's own generation
+        # check catches the switch and skips its write instead of landing here.
         store.delete_attachment_docs()
         store.delete_documents(
             collection=ChromaDBStore.RESEARCH_COLLECTION,

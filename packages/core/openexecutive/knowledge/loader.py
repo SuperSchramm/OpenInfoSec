@@ -181,6 +181,7 @@ async def ingest_file(
     collection: str = ChromaDBStore.COMPANY_COLLECTION,
     *,
     display_name: str | None = None,
+    expected_generation: int | None = None,
 ) -> int:
     """Extract, chunk, and upsert one file's text into ``collection``.
 
@@ -195,16 +196,20 @@ async def ingest_file(
     caller: the ``/documents`` route pairs this with its own explicit
     ``delete_documents(where={"filename": ...})`` call before ingesting
     (see that route — safe there because it sits behind the app-wide
-    shared-secret auth gate), but the attachment-ingest path has no such
-    purge path today — tracked as issue #25 step 2, deliberately deferred
-    pending a retention-policy decision, rather than folded into this fix.
-    (Issue #25 step 1 — the attachment path no longer *shares* a
+    shared-secret auth gate), but the attachment-ingest path has no
+    per-upload purge — issue #25 step 2 closed the growth/remediation gap
+    with a different mechanism instead (a daily age-based retention sweep,
+    ``attachment_retention.py``, plus an admin-triggered full-collection
+    wipe, ``DELETE /knowledge/attachments`` -> ``delete_attachment_docs()``),
+    not a per-filename delete. (Issue #25 step 1 — the attachment path no
+    longer *shares* a
     collection with curated ``/documents`` uploads at all; see
     ``ChromaDBStore.ATTACHMENT_COLLECTION`` and the ``collection`` param
     below. Chunks written to that collection also get ``type="attachment"``
     metadata, mirroring how Notion content is tagged ``type="notion"``.
-    The remaining gap is purge/retention *within* that collection, not
-    cross-collection trust confusion.)
+    That isolation is what makes step 2's sweep-and-wipe remediation safe
+    to run unconditionally against the whole collection -- it can never
+    touch curated ``/documents`` content by construction.)
 
     Deliberately does NOT derive the chunk id from ``display_name`` — an
     earlier version of this fix did, to also get automatic dedup on
@@ -224,6 +229,40 @@ async def ingest_file(
     chunk sets by default — callers that want overwrite-on-reupload (like
     ``/documents``) get it by deleting the old set by filename themselves
     first, not by relying on colliding ids.
+
+    ``expected_generation`` (issue #26): the caller's snapshot of
+    ``orchestrator.store_access.get_store_generation()``, re-checked here
+    immediately before the actual write below. This closes a race that's
+    specific to ``integrations/attachments.py``'s ``_schedule_ingest``: a
+    fire-and-forget background ingest task, scheduled via
+    ``loop.create_task()``, that a company switch or an admin attachment
+    purge can wipe/swap the store out from under before that task has even
+    had its first turn on the event loop (see the next paragraph for why
+    it's specifically *that* window and not the extraction time itself).
+
+    The capture point matters more than it looks: it must happen in the
+    caller's *synchronous* code, before the background task is even
+    scheduled onto the event loop -- not inside the task once it starts
+    running. This function has no ``await`` anywhere in it, so once a
+    caller's background task gets a turn on the loop it runs start-to-finish
+    (extraction, this check, the write) as one atomic step with no
+    interleaving possible; the only real window in which another coroutine
+    can run and bump the generation is *before* that task starts. A capture
+    taken after the task is already scheduled can itself observe a bump
+    that happened in that gap, making this check compare a stale value
+    against itself and never catch anything -- see ``_schedule_ingest``'s
+    comment for where the capture actually happens.
+
+    If the generation has advanced, the write is skipped rather than
+    landing in whatever now lives under ``collection``, and this returns
+    ``-1`` rather than ``0`` (round 2, logic review) -- ``0`` already means
+    "extracted no text" (see the early return right below), and a caller
+    that only checked ``count == 0`` to decide whether to log a race-skip
+    could misattribute an empty/unreadable attachment that also happened to
+    coincide with an unrelated switch as if the switch were the reason
+    nothing was written, when the two are unrelated. Callers that ingest
+    synchronously in the same request/turn that reads ``store`` have no
+    such window and leave this ``None``, so they never see ``-1``.
     """
     text = extract_text_from_file(path)
     if not text.strip():
@@ -269,6 +308,19 @@ async def ingest_file(
         for i in range(len(chunks))
     ]
     ids = [_make_chunk_id(str(path), i) for i in range(len(chunks))]
+
+    if expected_generation is not None:
+        from openexecutive.orchestrator.store_access import get_store_generation
+
+        if get_store_generation() != expected_generation:
+            logger.warning(
+                "ingest_file: skipping write to %s for %s -- store generation "
+                "advanced (%d -> %d) between the caller scheduling this ingest "
+                "and this task's first turn on the event loop, meaning a "
+                "company switch or attachment purge ran in that window (issue #26)",
+                collection, name, expected_generation, get_store_generation(),
+            )
+            return -1
 
     store.add_documents(texts=texts, metadatas=metadatas, ids=ids, collection=collection)
     return len(chunks)

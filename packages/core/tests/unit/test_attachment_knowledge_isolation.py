@@ -19,6 +19,11 @@ from unittest.mock import patch
 import pytest
 
 from openexecutive.knowledge.store import ChromaDBStore
+from openexecutive.orchestrator import store_access
+
+# The swap-generation reset fixture (issue #26) lives in tests/conftest.py
+# as an autouse fixture alongside reset_active_gateway/reset_active_store --
+# it applies here automatically.
 
 
 class FakeStore:
@@ -78,6 +83,22 @@ def test_delete_attachment_docs_clears_attachments_but_not_company(
     assert store.get_collection_count(ChromaDBStore.COMPANY_COLLECTION) == 1, (
         "delete_attachment_docs must not touch curated company docs"
     )
+
+
+def test_delete_attachment_docs_bumps_swap_generation(tmp_path: Path) -> None:
+    """Regression test for issue #26: the admin manual-purge route
+    (DELETE /knowledge/attachments) calls delete_attachment_docs() directly,
+    with no store swap alongside it -- unlike the 3 company-switch sites,
+    which already bump the generation via publish_swapped_store(). Without
+    this bump, a background attachment ingest mid-extraction when an admin
+    purges the collection could still land its write moments later,
+    silently defeating the purge."""
+    store = ChromaDBStore(persist_directory=tmp_path / "chroma")
+    before = store_access.get_store_generation()
+
+    store.delete_attachment_docs()
+
+    assert store_access.get_store_generation() == before + 1
 
 
 # --------------------------------------------------------------------------- #
@@ -410,6 +431,119 @@ def test_ingest_file_does_not_set_ingested_at_for_company_collection(
     chunks = store.collections[ChromaDBStore.COMPANY_COLLECTION]
     assert chunks, "expected at least one indexed chunk"
     assert all("ingested_at" not in c["metadata"] for c in chunks)
+
+
+# --------------------------------------------------------------------------- #
+# knowledge/loader.py — expected_generation race guard (issue #26)
+# --------------------------------------------------------------------------- #
+
+def test_ingest_file_writes_normally_when_generation_unchanged(tmp_path: Path) -> None:
+    """No company switch/purge happened between the caller resolving the
+    store and this call reaching its write -- the ingest proceeds exactly
+    as if expected_generation were never passed."""
+    from openexecutive.knowledge.loader import ingest_file
+
+    path = tmp_path / "notes.md"
+    path.write_text("some real attachment content here", encoding="utf-8")
+    store = FakeStore()
+
+    count = asyncio.run(
+        ingest_file(
+            path,
+            store,
+            collection=ChromaDBStore.ATTACHMENT_COLLECTION,
+            expected_generation=store_access.get_store_generation(),
+        )
+    )
+
+    assert count > 0
+    assert store.collections[ChromaDBStore.ATTACHMENT_COLLECTION]
+
+
+def test_ingest_file_skips_write_when_generation_advanced_mid_flight(
+    tmp_path: Path,
+) -> None:
+    """The actual issue #26 regression: if the swap generation has moved on
+    by the time ingest_file is ready to write (a company switch or
+    attachment purge ran while this call was extracting text), the write
+    must be skipped entirely -- not land in whatever now lives under
+    `collection` -- and the function must return -1 (not raise, and not a
+    plain 0, which means something different -- see the docstring on
+    `expected_generation`)."""
+    from openexecutive.knowledge.loader import ingest_file
+
+    path = tmp_path / "notes.md"
+    path.write_text("some real attachment content here", encoding="utf-8")
+    store = FakeStore()
+    captured_generation = store_access.get_store_generation()
+    store_access.bump_store_generation()  # simulates a switch/purge mid-extraction
+
+    count = asyncio.run(
+        ingest_file(
+            path,
+            store,
+            collection=ChromaDBStore.ATTACHMENT_COLLECTION,
+            expected_generation=captured_generation,
+        )
+    )
+
+    assert count == -1
+    assert ChromaDBStore.ATTACHMENT_COLLECTION not in store.collections, (
+        "a stale-generation ingest must never reach add_documents()"
+    )
+
+
+def test_ingest_file_ignores_generation_when_not_passed(tmp_path: Path) -> None:
+    """Callers with no race window (e.g. the /documents route, which reads
+    `store` and writes in the same request) leave expected_generation=None
+    and get the pre-issue-#26 behavior unconditionally -- a swap happening
+    around an unrelated call must never affect them."""
+    from openexecutive.knowledge.loader import ingest_file
+
+    path = tmp_path / "policy.md"
+    path.write_text("curated company policy text", encoding="utf-8")
+    store = FakeStore()
+    store_access.bump_store_generation()  # unrelated swap elsewhere in the process
+
+    count = asyncio.run(ingest_file(path, store))  # expected_generation defaults to None
+
+    assert count > 0
+    assert store.collections[ChromaDBStore.COMPANY_COLLECTION]
+
+
+def test_ingest_file_has_no_await_between_extraction_and_write() -> None:
+    """Structural guard for issue #26 (round-2 security review): the whole
+    generation-guard design in _schedule_ingest/ingest_file relies on
+    ingest_file containing zero `await` points -- that's what makes
+    `expected_generation`, captured once before the background task is
+    scheduled, still valid all the way through to the write below (nothing
+    can run on the event loop and bump the generation mid-function if
+    ingest_file itself never yields). If a future change wraps any part of
+    this function's work in an `await` (e.g. `asyncio.to_thread` for a slow
+    PDF, following this codebase's own convention elsewhere), that
+    assumption silently breaks and the guard stops meaning what its
+    docstring says -- with every existing test still green, since none of
+    them can produce a real interleaving without one. This test parses
+    ingest_file's own source and fails loudly the moment that happens,
+    forcing whoever makes that change to consciously re-derive the guard
+    (e.g. re-checking expected_generation from inside the now-yielding
+    section) rather than silently reopening the race."""
+    import ast
+    import inspect
+
+    from openexecutive.knowledge import loader
+
+    source = inspect.getsource(loader.ingest_file)
+    tree = ast.parse(source)
+    (func_def,) = tree.body
+    assert isinstance(func_def, ast.AsyncFunctionDef)
+
+    awaits = [node for node in ast.walk(func_def) if isinstance(node, ast.Await)]
+    assert not awaits, (
+        "ingest_file gained an `await` -- this breaks the issue #26 "
+        "generation-guard's atomicity assumption (see this test's "
+        "docstring); re-derive the guard before adding one"
+    )
 
 
 # --------------------------------------------------------------------------- #

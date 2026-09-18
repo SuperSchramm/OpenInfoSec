@@ -175,6 +175,102 @@ async def test_schedule_ingest_uses_attachment_collection_not_company():
     )
 
 
+@pytest.mark.asyncio
+async def test_schedule_ingest_passes_generation_to_ingest_file():
+    """Regression test for issue #26: _schedule_ingest must forward
+    get_store_generation()'s value to ingest_file as expected_generation --
+    not omit it. This only proves the value is threaded through the kwarg;
+    it does not prove *when* it was captured (mocking get_store_generation
+    to a constant can't distinguish an early vs. late capture point -- see
+    test_schedule_ingest_generation_captured_before_task_is_scheduled below
+    for a test that actually exercises the timing)."""
+    from openexecutive.integrations import attachments
+
+    fake_store = MagicMock()
+
+    with (
+        patch(
+            "openexecutive.orchestrator.store_access.get_shared_store",
+            return_value=fake_store,
+        ),
+        patch(
+            "openexecutive.orchestrator.store_access.get_store_generation",
+            return_value=42,
+        ),
+        patch(
+            "openexecutive.knowledge.loader.ingest_file",
+            AsyncMock(return_value=3),
+        ) as mock_ingest,
+    ):
+        attachments._schedule_ingest(b"hello world", "notes.txt")
+        pending = list(attachments._ingest_tasks)
+        assert pending, "expected a background ingest task to be scheduled"
+        await asyncio.gather(*pending)
+
+    mock_ingest.assert_awaited_once()
+    assert mock_ingest.await_args.kwargs["expected_generation"] == 42
+
+
+@pytest.mark.asyncio
+async def test_schedule_ingest_generation_captured_before_task_is_scheduled():
+    """Round-2 security review, issue #26: expected_generation must be
+    captured in _schedule_ingest's own synchronous body, before
+    loop.create_task(_run()) queues the background task -- not inside
+    _run() once it starts running.
+
+    Why this matters: ingest_file has no `await` anywhere in it (text
+    extraction is CPU-bound sync work), so once the scheduled task gets a
+    turn on the event loop it runs extraction, the generation check, and
+    the write as one atomic, non-interleaved step. The only real window in
+    which a company switch or admin purge can run and bump the generation
+    is *between* _schedule_ingest() returning and that task's first turn --
+    exactly the window this test occupies, by bumping the generation right
+    after _schedule_ingest() returns and before yielding to let the task
+    run. Uses the real ingest_file (not a mock) against a FakeStore so the
+    assertion exercises the actual check-and-skip path, not just kwarg
+    threading -- a capture point moved into _run() would observe the bump
+    that already happened and (wrongly) match itself, letting this content
+    through; a mocked ingest_file couldn't tell the difference either way."""
+    from openexecutive.integrations import attachments
+    from openexecutive.orchestrator.store_access import (
+        _reset_store_generation_for_tests,
+        bump_store_generation,
+    )
+
+    class _FakeStore:
+        def __init__(self) -> None:
+            self.collections: dict[str, list[dict]] = {}
+
+        def add_documents(self, texts, metadatas, ids, collection):
+            col = self.collections.setdefault(collection, [])
+            for t, m, i in zip(texts, metadatas, ids, strict=True):
+                col.append({"id": i, "text": t, "metadata": m})
+
+    _reset_store_generation_for_tests()
+    fake_store = _FakeStore()
+
+    try:
+        with patch(
+            "openexecutive.orchestrator.store_access.get_shared_store",
+            return_value=fake_store,
+        ):
+            attachments._schedule_ingest(b"some real attachment content", "notes.txt")
+            # Simulate a company switch / admin purge landing in the gap
+            # between scheduling and the task's first (only) turn.
+            bump_store_generation()
+            pending = list(attachments._ingest_tasks)
+            assert pending, "expected a background ingest task to be scheduled"
+            await asyncio.gather(*pending)
+    finally:
+        _reset_store_generation_for_tests()
+
+    assert fake_store.collections == {}, (
+        "a generation captured before scheduling must see the mid-window "
+        "bump and skip the write -- if this fires, the capture point "
+        "regressed back inside _run()"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # build_attachment_output — image routing
 # --------------------------------------------------------------------------- #

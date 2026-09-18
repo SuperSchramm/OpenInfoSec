@@ -631,8 +631,9 @@ async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
     # docs so a completed switch doesn't leave a prior company's
     # attachment content readable in the new one. A late-finishing
     # background ingest task can still race a switch that starts
-    # mid-upload — pre-existing gap, tracked separately as issue #26, not
-    # closed by this call.
+    # mid-upload; delete_attachment_docs() below bumps the swap-generation
+    # counter (issue #26) so such a task's own generation check catches
+    # the switch and skips its write instead of landing here.
     store.delete_attachment_docs()
     # Per-company research artifacts never carry across companies.
     store.delete_documents(
@@ -647,6 +648,11 @@ async def _rebuild_vector_state(settings: Any, app_state: Any | None) -> int:
     company_docs_dir: Path = settings.company_profile_path.parent / "docs"
     docs_indexed = 0
     for doc in sorted(company_docs_dir.glob("*.md")):
+        # No expected_generation here (this loop IS the synchronous
+        # write, not a background task racing one) -- keep it that way.
+        # ingest_file can return -1 (issue #26) when expected_generation is
+        # passed and stale; += on that would silently under-report this
+        # count for anyone who adds the kwarg here without also handling it.
         docs_indexed += await ingest_file(
             path=doc, store=store, collection=ChromaDBStore.COMPANY_COLLECTION
         )
