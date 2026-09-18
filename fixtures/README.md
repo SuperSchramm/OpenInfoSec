@@ -103,7 +103,11 @@ Specialists retrieve company docs by domain (a CISO query looks at `security` an
 2. A domain directory in its path (`.../finance/...`), which fixture docs never have.
 3. Otherwise `general`.
 
-`general` means "not specific to one domain" and is visible to **every** specialist, so an untagged doc always works. Tag a doc only when you want to *narrow* it to that domain's specialists, for example a finance-only budget memo:
+`general` means "not specific to one domain" and is visible to **every** specialist, so an untagged doc always works. Tag a doc only when you want to *narrow* it to that domain's specialists, for example a finance-only budget memo.
+
+**Documents the whole executive team needs should stay `general`, even when one function owns them.** An incident response plan is owned by Security, but Legal, Finance, Communications and the CEO each need to see their part of it; tagged `security`, they never would. The same applies to business continuity plans (BCP), disaster recovery plans (DRP), crisis and communication plans, escalation and on-call procedures, company-wide policies (acceptable use, data classification), and org charts / decision rights. A fixture should model this: leave those untagged, and tag only genuinely single-function docs.
+
+Example of a doc worth narrowing:
 
 ```markdown
 ---
@@ -113,7 +117,7 @@ domain: finance
 ...
 ```
 
-Allowed values: `strategy`, `finance`, `hr`, `legal`, `operations`, `marketing`, `board`, `product`, `security`, `governance`, `compliance`, `talent`, `general`. An unknown value is ignored with a warning and the doc is indexed as `general`. Each doc carries one domain, and a tagged doc is not retrieved by specialists outside that domain, so leave cross-cutting docs (an incident response plan that Legal and Security both need) untagged. A tag is applied when the fixture is loaded; if the docs are later re-indexed without a fixture load (for example a client-slot rebuild) they fall back to `general`, which every specialist can see, so the drift is always toward *more* visibility, never less. Values over 1024 characters of front-matter, or that aren't valid YAML, are ignored with a warning.
+Allowed values: `strategy`, `finance`, `hr`, `legal`, `operations`, `marketing`, `board`, `product`, `security`, `governance`, `compliance`, `talent`, `general`. An unknown value is ignored with a warning and the doc is indexed as `general`. Each doc carries one domain, and a tagged doc is not retrieved by specialists outside that domain, so leave cross-cutting docs untagged (see above). A tag is applied when the fixture is loaded; if the docs are later re-indexed without a fixture load (for example a client-slot rebuild) they fall back to `general`, which every specialist can see, so the drift is always toward *more* visibility, never less. Values over 1024 characters of front-matter, or that aren't valid YAML, are ignored with a warning.
 
 ### Authoring `departments.yaml`
 

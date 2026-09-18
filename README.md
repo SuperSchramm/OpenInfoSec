@@ -215,6 +215,20 @@ curl -X POST http://localhost:8000/documents \
   -F "domain=strategy"
 ```
 
+### Choosing a domain
+
+Each document carries one **domain**, and specialists retrieve documents by domain: the CISO reads `security` and `governance` documents, the CFO reads `finance`, and so on. A document tagged with a domain is **not** retrieved by specialists outside it. The default, `general`, means "not specific to one function" and is visible to **every** specialist.
+
+**Use `general` for any document the whole executive team needs, even if one function owns it.** The classic case is an **incident response plan**: Security owns it, but Legal needs to know its role in breach notification, Finance in ransom and insurance decisions, Communications in what gets said and when, and the CEO in who decides. If it is tagged `security`, those specialists never see their part of the plan. The same goes for:
+
+- Incident response plans and escalation / on-call procedures
+- **Business continuity plans (BCP)** and **disaster recovery plans (DRP)**
+- Crisis and communication plans (internal, customer, regulator, press, board)
+- Company-wide policies everyone must follow (acceptable use, data classification, code of conduct)
+- Org charts, roles and responsibilities, decision rights and delegations of authority
+
+Tag a document with a specific domain only when it is genuinely one function's business and you want the others kept out of it, for example a finance-only budget memo (`finance`) or a compensation study (`hr`). When in doubt, leave it `general`.
+
 ## Deployment (Fly.io)
 
 Two environments, each a separate set of Fly apps, driven by branch:
