@@ -62,6 +62,15 @@ def _query_results_message(results: list[dict[str, Any]]) -> _FakeMessage:
     ])
 
 
+@pytest.fixture(autouse=True)
+def _web_search_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QuerySource.poll() short-circuits when ``enable_web_search`` is False, so
+    these tests state what they depend on instead of inheriting it from the
+    ambient environment (issue #28). tests/conftest.py already keeps the repo
+    ``.env`` out; this also covers a variable exported in the developer's shell."""
+    monkeypatch.setenv("ENABLE_WEB_SEARCH", "true")
+
+
 def _make_query_item(
     *,
     slug: str = "q-acme",

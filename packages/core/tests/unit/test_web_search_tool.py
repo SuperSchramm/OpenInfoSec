@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +18,27 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "sk-test-not-used")
 import pytest
 
 from openexecutive.config import get_settings
+
+_WEB_SEARCH_ENV = (
+    "ENABLE_WEB_SEARCH",
+    "WEB_SEARCH_MAX_USES",
+    "WEB_SEARCH_ALLOWED_DOMAINS",
+    "WEB_SEARCH_BLOCKED_DOMAINS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_web_search_env() -> Iterator[None]:
+    """These tests write os.environ directly; put it back afterwards so
+    ``ENABLE_WEB_SEARCH=false`` etc. can't leak into whichever test file runs
+    next (issue #28 -- same class of leak as a developer's .env)."""
+    saved = {k: os.environ.get(k) for k in _WEB_SEARCH_ENV}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 def _reset_settings_cache() -> None:

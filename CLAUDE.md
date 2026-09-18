@@ -150,6 +150,12 @@ See `.env.example`. Required: `ANTHROPIC_API_KEY`. Optional integrations: `SLACK
 > `env -u BACKEND_SHARED_SECRET uv run pytest tests/unit/` — to match CI (CI
 > does not set it).
 
+> **Local `.env` and tests:** `tests/conftest.py` drops the repo-root `.env`
+> for every test (issue #28), so a local run behaves like CI. Variables
+> already *exported in your shell* still reach `Settings` (the
+> `BACKEND_SHARED_SECRET` case above), so a test that depends on a specific
+> value should set it itself (`monkeypatch.setenv` / `Settings(KEY=...)`).
+
 > **UI lint:** `packages/ui` has no ESLint config — `npm run lint` opens an
 > interactive setup prompt. `npm run build` (`next build`) is the UI's
 > lint/type gate.

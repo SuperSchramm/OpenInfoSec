@@ -49,3 +49,25 @@ def _reset_store_generation():
     store_access._reset_store_generation_for_tests()
     yield
     store_access._reset_store_generation_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def isolate_settings_from_dotenv(monkeypatch: pytest.MonkeyPatch):
+    """Keep a developer's repo-root ``.env`` out of every test (issue #28).
+
+    ``Settings`` reads ``env_file=<repo>/.env`` on every ``get_settings()``
+    call, so a real dev ``.env`` (a key set to a non-default, e.g.
+    ``ENABLE_WEB_SEARCH=false``) silently changed behavior under test -- 4
+    tests failed locally that pass in CI, which has no ``.env``. Dropping the
+    file makes a local run match CI. Tests that need a specific value set it
+    explicitly (``monkeypatch.setenv`` or ``Settings(SOME_KEY=...)``); an
+    explicit ``Settings(_env_file=...)`` argument still wins over this.
+
+    Only the FILE is isolated: variables already exported in the shell still
+    reach ``Settings`` (CLAUDE.md's ``BACKEND_SHARED_SECRET`` note is the known
+    case), so a test that depends on one should set it itself.
+    """
+    from openexecutive.config import Settings
+
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    yield
