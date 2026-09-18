@@ -561,6 +561,39 @@ knowledge:
         the active docs dir without a fixture load (e.g. a client-slot
         rebuild) re-tags from the path, i.e. "general" -- drift is always
         toward more visibility, never toward hiding a doc.
+        Chunking (issue #31): `ingest_file` splits company docs into 120-word
+        chunks (20 overlap; `loader.COMPANY_DOC_CHUNK_WORDS`), NOT the 512
+        used elsewhere. Chroma's default embedding model (all-MiniLM-L6-v2)
+        embeds only the first 256 tokens of its input -- verified: texts that
+        differ only after token 256 embed identically -- and technical prose
+        runs ~1.6 tokens/word, so a 512-word chunk was represented by roughly
+        its first third and the rest was invisible to vector search. 120 words
+        peaked at 222 tokens on real policy docs. Measured on five policy docs
+        at the 0.55 gate: recall@3 6/12 -> 9/12 with no false positives, and
+        2/8 -> 6/8 specific facts reaching a specialist. The gate itself was
+        left alone (loosening it admits unrelated queries once chunks are
+        small). Attachments deliberately keep 512/50
+        (`ATTACHMENT_CHUNK_*`): chunk count, and so the synchronous
+        loop-blocking embedding work inside `ingest_file` (~14ms/chunk, ~4.3x
+        more chunks), scales with the smaller size, and that path accepts
+        files from any rostered sender. The same reasoning bounds huge admin
+        uploads: a doc over `COMPANY_DOC_FINE_CHUNK_MAX_WORDS` (60,000 words,
+        ~120 pages) falls back to 512/50 when the caller didn't pick a size, so
+        the worst-case synchronous embedding time for a single document is never
+        worse than before (an extracted 50MB text file is ~8M words: ~19 min at
+        120-word chunks vs ~4 min). The bound is per document, not per batch: a
+        loop over many sub-limit docs (fixture load, client-slot rebuild) still
+        costs ~4.6x what it did. Docs ingested before this change keep their old chunks until
+        re-ingested (re-upload, or reload the fixture). BUILTIN, Notion and
+        research ingestion still use larger chunks (same 256-token truncation
+        applies to them; not addressed here). Known trade-offs, measured not
+        fixed: each hit carries less text and the distance gate (not
+        `n_results`) limits how many chunks return, so a broad "walk me
+        through the whole plan" question reaches fewer sections of a plan than
+        a targeted one (e.g. 5 of 10 for cyberops on the incident response
+        plan; +/-1 neighbor expansion was simulated and gave mixed results);
+        and a 120-word boundary can fall mid-sentence, so a condition and its
+        negation may land in different chunks.
     - name: NOTION_WIKI
       what: |
         Synced Notion wiki pages (ChromaDB collection `notion_wiki`). Kept

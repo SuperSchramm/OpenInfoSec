@@ -167,7 +167,11 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
     async def _run() -> None:
         suffix = _suffix_from_filename(filename)
         try:
-            from openexecutive.knowledge.loader import ingest_file
+            from openexecutive.knowledge.loader import (
+                ATTACHMENT_CHUNK_OVERLAP,
+                ATTACHMENT_CHUNK_WORDS,
+                ingest_file,
+            )
             from openexecutive.knowledge.store import ChromaDBStore
             from openexecutive.orchestrator.store_access import (
                 get_shared_store as _get_store,
@@ -213,6 +217,9 @@ def _schedule_ingest(data: bytes, filename: str) -> None:
                     collection=ChromaDBStore.ATTACHMENT_COLLECTION,
                     display_name=filename,
                     expected_generation=expected_generation,
+                    # Legacy chunking on purpose -- see ATTACHMENT_CHUNK_WORDS.
+                    chunk_words=ATTACHMENT_CHUNK_WORDS,
+                    chunk_overlap=ATTACHMENT_CHUNK_OVERLAP,
                 )
                 if count == -1:
                     # ingest_file returns -1 (never for any other reason,

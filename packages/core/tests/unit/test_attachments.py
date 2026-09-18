@@ -11,13 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openexecutive.integrations.attachments import (
-    AttachmentItem,
     _MAX_EXTRACTED_CHARS,
+    AttachmentItem,
     build_attachment_output,
     download_bytes,
     process_attachments,
 )
-
 
 # --------------------------------------------------------------------------- #
 # download_bytes
@@ -209,6 +208,30 @@ async def test_schedule_ingest_passes_generation_to_ingest_file():
 
     mock_ingest.assert_awaited_once()
     assert mock_ingest.await_args.kwargs["expected_generation"] == 42
+
+
+@pytest.mark.asyncio
+async def test_schedule_ingest_keeps_the_legacy_chunking_for_attachments():
+    """Issue #31: company docs moved to 120-word chunks (~4.6x more embedding
+    work, synchronous on the event loop). Attachments come from any rostered
+    sender, so they must keep the old 512/50 chunking -- pin the kwargs that
+    actually reach ingest_file, not a source string."""
+    from openexecutive.integrations import attachments
+    from openexecutive.knowledge.loader import ATTACHMENT_CHUNK_OVERLAP, ATTACHMENT_CHUNK_WORDS
+
+    with (
+        patch("openexecutive.orchestrator.store_access.get_shared_store", return_value=MagicMock()),
+        patch("openexecutive.knowledge.loader.ingest_file", AsyncMock(return_value=3)) as mock_ingest,
+    ):
+        attachments._schedule_ingest(b"hello world", "notes.txt")
+        pending = list(attachments._ingest_tasks)
+        assert pending, "expected a background ingest task to be scheduled"
+        await asyncio.gather(*pending)
+
+    mock_ingest.assert_awaited_once()
+    assert (ATTACHMENT_CHUNK_WORDS, ATTACHMENT_CHUNK_OVERLAP) == (512, 50)
+    assert mock_ingest.await_args.kwargs["chunk_words"] == ATTACHMENT_CHUNK_WORDS
+    assert mock_ingest.await_args.kwargs["chunk_overlap"] == ATTACHMENT_CHUNK_OVERLAP
 
 
 @pytest.mark.asyncio

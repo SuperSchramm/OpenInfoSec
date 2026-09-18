@@ -32,7 +32,46 @@ DOMAIN_MAP: dict[str, str] = {
 }
 
 
+# Chunk size for company docs (issue #31). Chroma's default embedding model
+# (all-MiniLM-L6-v2) embeds only the FIRST 256 TOKENS of its input -- verified:
+# two texts that differ only after token 256 embed identically (cosine 1.0).
+# Technical prose averages ~1.6 tokens/word, so the old 512-word chunks
+# (~680 tokens) were represented by roughly their first third and the rest was
+# invisible to vector search. 120 words peaked at 222 tokens on real policy
+# docs (fits with margin); 150 already overflowed. Measured on the five
+# clearpath_health policy docs at the 0.55 distance gate: recall@3 6/12 ->
+# 9/12 with no false positives, and 2/8 -> 6/8 specific facts actually
+# reaching the specialist.
+COMPANY_DOC_CHUNK_WORDS = 120
+COMPANY_DOC_CHUNK_OVERLAP = 20
+
+# Above this many words a doc falls back to the previous 512/50 chunking (only
+# when the caller didn't ask for a size explicitly). Embedding runs
+# synchronously on the event loop inside ingest_file at ~14ms/chunk, and the
+# smaller size means ~4.6x more chunks: fine for a normal document (a 100-page
+# policy is ~6.8s), but an extracted 50MB text file (~8M words) would freeze the
+# whole process for ~19 minutes instead of ~4. Past this point the doc is not
+# a policy anyone retrieves passages from by fine-grained match anyway, and the
+# fallback keeps a single document's worst case exactly what it was before this
+# change -- no content is dropped and no new failure mode is introduced. 60,000
+# words is ~120 pages, i.e. <=~8s of fine chunking. The bound is PER DOCUMENT:
+# a loop over many sub-limit docs (a fixture load, a client-slot rebuild) still
+# costs ~4.6x what it did, N x ~8s instead of N x ~1.8s for N near-limit docs.
+COMPANY_DOC_FINE_CHUNK_MAX_WORDS = 60_000
+
+# Attachments keep the previous chunking on purpose. Chunk count (and so the
+# synchronous, event-loop-blocking embedding work inside ingest_file) scales
+# ~4.3x with the smaller size -- fine for an admin-curated /documents upload
+# behind the shared secret, but attachments are accepted from any rostered
+# sender, where that multiplier is the wrong trade.
+ATTACHMENT_CHUNK_WORDS = 512
+ATTACHMENT_CHUNK_OVERLAP = 50
+
+
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]:
+    if chunk_size < 1 or not 0 <= overlap < chunk_size:
+        # overlap >= chunk_size would never advance `start` (infinite loop).
+        raise ValueError(f"need chunk_size >= 1 and 0 <= overlap < chunk_size, got {chunk_size}/{overlap}")
     words = text.split()
     if not words:
         return []
@@ -259,6 +298,8 @@ async def ingest_file(
     display_name: str | None = None,
     expected_generation: int | None = None,
     honor_front_matter: bool = False,
+    chunk_words: int | None = None,
+    chunk_overlap: int | None = None,
 ) -> int:
     """Extract, chunk, and upsert one file's text into ``collection``.
 
@@ -362,6 +403,17 @@ async def ingest_file(
     client-slot rebuild) tags each doc from its path again -- "general", which
     every specialist can see -- so the drift is always in the permissive
     direction, never toward hiding a doc.
+
+    ``chunk_words`` / ``chunk_overlap`` (issue #31): when omitted, company
+    chunking applies -- ``COMPANY_DOC_CHUNK_WORDS`` / ``COMPANY_DOC_CHUNK_OVERLAP``,
+    sized so a whole chunk fits the embedding model's 256-token window (see
+    those constants) -- except that a doc over
+    ``COMPANY_DOC_FINE_CHUNK_MAX_WORDS`` falls back to the previous 512/50 so
+    the synchronous embedding work can't grow ~4.6x for a huge file. An
+    explicit value is always used as given. The attachment path passes
+    ``ATTACHMENT_CHUNK_*`` to keep its old chunking. Docs ingested before this
+    change keep their old 512-word chunks until re-ingested (re-upload, or
+    reload the fixture).
     """
     text = extract_text_from_file(path)
     declared_domain: str | None = None
@@ -371,7 +423,20 @@ async def ingest_file(
         return 0
 
     inferred_domain = domain or declared_domain or infer_domain_from_path(path)
-    chunks = chunk_text(text, chunk_size=512, overlap=50)
+    if chunk_words is None and chunk_overlap is None:
+        if len(text.split()) > COMPANY_DOC_FINE_CHUNK_MAX_WORDS:
+            chunk_words, chunk_overlap = ATTACHMENT_CHUNK_WORDS, ATTACHMENT_CHUNK_OVERLAP
+            logger.info(
+                "ingest_file: %s is over %d words -- using %d-word chunks instead of %d "
+                "to bound synchronous embedding time",
+                _sanitize_display_name(display_name or path.name),
+                COMPANY_DOC_FINE_CHUNK_MAX_WORDS, ATTACHMENT_CHUNK_WORDS, COMPANY_DOC_CHUNK_WORDS,
+            )
+        else:
+            chunk_words, chunk_overlap = COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP
+    elif chunk_words is None or chunk_overlap is None:
+        raise ValueError("pass chunk_words and chunk_overlap together, or neither")
+    chunks = chunk_text(text, chunk_size=chunk_words, overlap=chunk_overlap)
 
     name = _sanitize_display_name(display_name) if display_name else path.name
     source_label = name if display_name else str(path)

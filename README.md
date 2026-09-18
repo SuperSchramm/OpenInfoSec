@@ -227,6 +227,8 @@ Each document carries one **domain**, and specialists retrieve documents by doma
 - Company-wide policies everyone must follow (acceptable use, data classification, code of conduct)
 - Org charts, roles and responsibilities, decision rights and delegations of authority
 
+Documents are split into short (~120-word) passages before indexing so each passage is fully searchable. Documents uploaded on an older version keep their old, larger passages until you re-upload them (or, for a demo fixture, reload it).
+
 Tag a document with a specific domain only when it is genuinely one function's business and you want the others kept out of it, for example a finance-only budget memo (`finance`) or a compensation study (`hr`). When in doubt, leave it `general`.
 
 ## Deployment (Fly.io)
