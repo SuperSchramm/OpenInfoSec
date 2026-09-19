@@ -187,9 +187,24 @@ def _make_chunk_id(source: str, chunk_index: int) -> str:
     return hashlib.md5(base.encode()).hexdigest()
 
 
-def infer_domain_from_path(path: Path) -> str:
-    for part in path.parts:
-        domain = DOMAIN_MAP.get(part.lower())
+def infer_domain_from_path(path: Path, root: Path | None = None) -> str:
+    """The domain a file's folder names imply, else "general" (visible to every specialist).
+
+    Only folders that are part of the *corpus layout* count. With ``root`` (the
+    corpus directory the file was found under) that is the folders between
+    ``root`` and the file, so ``builtin/security/x.md`` is ``security`` and
+    ``builtin/failures/legal/x.md`` is ``legal``. Without ``root`` -- or when the
+    file isn't under it -- only the file's immediate parent folder is looked at.
+    Never the rest of the absolute path (issue #35): an install, checkout or
+    home directory that happens to sit under a folder called ``legal`` or
+    ``security`` used to tag EVERY document with that domain, hiding company
+    docs from the other specialists.
+    """
+    folders: tuple[str, ...] = (path.parent.name,)
+    if root is not None and path.is_relative_to(root):
+        folders = path.relative_to(root).parts[:-1]
+    for folder in folders:
+        domain = DOMAIN_MAP.get(folder.lower())
         if domain:
             return domain
     return "general"
@@ -602,7 +617,7 @@ async def ingest_builtin_file(
     text = path.read_text(encoding="utf-8")
     if not text.strip():
         return 0
-    domain = infer_domain_from_path(path)
+    domain = infer_domain_from_path(path, BUILTIN_KNOWLEDGE_PATH)
     if chunk_size is None and overlap is None:
         chunk_size, overlap = default_chunking(text)
     elif chunk_size is None or overlap is None:
@@ -662,6 +677,7 @@ class _Indexed(NamedTuple):
 def _index_seed_files(
     store: ChromaDBStore,
     files: list[Path],
+    root: Path,
     collection: str,
     chunk_type: str,
 ) -> _Indexed:
@@ -691,7 +707,7 @@ def _index_seed_files(
         chunks = chunk_text(text, *default_chunking(text))
         metadatas: list[dict[str, Any]] = [
             {
-                "domain": infer_domain_from_path(md_file),
+                "domain": infer_domain_from_path(md_file, root),
                 "filename": md_file.name,
                 "source": str(md_file),
                 "chunk_index": i,
@@ -776,7 +792,7 @@ def _seed_or_migrate(
         if manifest is None:
             present = store.indexed_files(collection, {"type": chunk_type})
             if present is not None:  # None = unreadable: learn nothing, add nothing
-                manifest = {key for f, key in keys.items() if (infer_domain_from_path(f), f.name) in present}
+                manifest = {key for f, key in keys.items() if (infer_domain_from_path(f, root), f.name) in present}
         unseen = {f for f in files if manifest is not None and keys[f] not in manifest}
         targets = [f for f in files if f in stale_files or f in unseen]
         if stale_rows:
@@ -792,7 +808,7 @@ def _seed_or_migrate(
             return 0
 
     try:
-        result = _index_seed_files(store, targets, collection, chunk_type)
+        result = _index_seed_files(store, targets, root, collection, chunk_type)
     except Exception:
         if not populated:
             raise

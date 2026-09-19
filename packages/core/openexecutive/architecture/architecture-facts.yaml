@@ -576,8 +576,10 @@ knowledge:
         tag (issue #29): the uploader's choice, else -- for a FIXTURE load
         only (`ingest_file(honor_front_matter=True)`, opt-in and off
         everywhere else) -- a `domain:` declared in a markdown doc's
-        front-matter, else inferred from a domain directory in the path, else
-        "general". Front-matter is document content, so it is never honored
+        front-matter, else inferred from the file's immediate parent folder
+        (built-in docs: the folders under the corpus root; issue #35 -- never
+        the rest of the absolute path, so an install under a folder named
+        like a domain can't re-tag everything), else "general". Front-matter is document content, so it is never honored
         for uploads, attachments, client-switch re-ingest or restore-from-
         backup: it must not let a doc's own body re-tag what an admin chose or
         let a sender pick their own tag. "general" means not specific to one
