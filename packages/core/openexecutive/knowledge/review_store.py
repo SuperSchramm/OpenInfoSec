@@ -154,14 +154,26 @@ class ReviewStore:
 
         Idempotent — safe to call on every startup. Returns number of new registrations.
         """
-        from openexecutive.knowledge.loader import BUILTIN_KNOWLEDGE_PATH
+        from openexecutive.knowledge.loader import (
+            BUILTIN_KNOWLEDGE_PATH,
+            builtin_overlay_root,
+            tombstone_path,
+        )
 
         now = datetime.now(UTC).isoformat()
         new_count = 0
+        # Shipped docs plus docs authored/edited through the API (issue #36).
+        docs = [(root, f) for root in (BUILTIN_KNOWLEDGE_PATH, builtin_overlay_root()) if root.is_dir() for f in sorted(root.rglob("*.md"))]
         with _get_conn(db_path) as conn:
-            for md_file in sorted(BUILTIN_KNOWLEDGE_PATH.rglob("*.md")):
-                # Skip skills — they have separate management
-                if "skills" in md_file.parts:
+            for root, md_file in docs:
+                # Skip skills — they have separate management. Judged on the path
+                # RELATIVE to the corpus (issue #35 class): a checkout that sits
+                # under a folder named "skills" must not skip everything.
+                rel = md_file.relative_to(root)
+                if "skills" in rel.parts:
+                    continue
+                # A shipped doc deleted through the API stays deleted (issue #36).
+                if root == BUILTIN_KNOWLEDGE_PATH and tombstone_path(builtin_overlay_root(), rel).exists():
                     continue
                 domain = md_file.parent.name
                 filename = md_file.name

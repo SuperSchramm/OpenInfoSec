@@ -6,6 +6,7 @@ import os
 import re
 import time
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -16,7 +17,9 @@ from openexecutive.knowledge.store import ChromaDBStore
 logger = logging.getLogger(__name__)
 
 BUILTIN_KNOWLEDGE_PATH = Path(__file__).parent / "builtin"
-FAILURES_KNOWLEDGE_PATH = BUILTIN_KNOWLEDGE_PATH / "failures"
+FAILURES_DIRNAME = "failures"
+SKILLS_DIRNAME = "skills"
+FAILURES_KNOWLEDGE_PATH = BUILTIN_KNOWLEDGE_PATH / FAILURES_DIRNAME
 
 DOMAIN_MAP: dict[str, str] = {
     "strategy": "strategy",
@@ -668,6 +671,97 @@ def list_company_docs(docs_dir: Path) -> list[dict[str, Any]]:
 _CHUNKING_PENDING = "pending"
 
 
+def builtin_overlay_root() -> Path:
+    """The writable folder for documents authored or edited through the API (issue #36).
+
+    The shipped corpus lives inside the package, i.e. the container image, which
+    is replaced on every deploy; the vector store lives on a persistent volume.
+    Writing API-authored docs into the package therefore lost the files but kept
+    their rows. They go here instead, on the same volume as the store, in the
+    same ``<domain>/<file>.md`` layout (failure cases under ``failures/``).
+    """
+    from openexecutive.config import get_settings
+
+    settings = get_settings()
+    if settings.builtin_overlay_path is not None:
+        # Stored rows record absolute paths, so a relative setting must not depend
+        # on the working directory of whichever process reads it.
+        return settings.builtin_overlay_path.expanduser().resolve()
+    return settings.vector_store_path.parent / "builtin_custom"
+
+
+def tombstone_path(overlay_root: Path, rel: Path) -> Path:
+    """The marker an API delete of a shipped doc leaves in the overlay (issue #36).
+
+    Shipped files are never modified or removed: they come back with every
+    image, so "deleted" has to be remembered somewhere that survives a deploy.
+    The marker is named ``<file>.md.deleted`` (not ``*.md``) so no corpus walk
+    can mistake it for a document.
+    """
+    return overlay_root / ".deleted" / rel.parent / (rel.name + ".deleted")
+
+
+@dataclass(frozen=True)
+class CorpusFile:
+    """One markdown file to index, with the corpus root it was found under.
+
+    ``key`` is stable across installs (path relative to ``root``; overlay files
+    are prefixed ``custom/``) and is what the seed manifest records. ``shadows``
+    is the shipped file an overlay file replaces, if any.
+    """
+
+    path: Path
+    root: Path
+    key: str
+    shadows: Path | None = None
+    # (shipped corpus folder name, *relative parts) of the shadowed shipped file,
+    # so its rows are recognised even when the install moved (issue #37).
+    shadows_location: tuple[str, ...] | None = None
+
+
+def _corpus_files(kind: str) -> list[CorpusFile]:
+    """Shipped markdown plus the overlay's; an overlay file wins over a shipped
+    one at the same relative path. ``kind`` is "builtin" or "failures"."""
+    if kind == "failures":
+        shipped_root, overlay_root = FAILURES_KNOWLEDGE_PATH, builtin_overlay_root() / FAILURES_DIRNAME
+    else:
+        shipped_root, overlay_root = BUILTIN_KNOWLEDGE_PATH, builtin_overlay_root()
+
+    def walk(root: Path, anchor: Path) -> dict[Path, Path]:
+        found: dict[Path, Path] = {}
+        if not root.is_dir():
+            return found
+        # Files must stay inside the corpus. The overlay's anchor is the true
+        # overlay root, not its failures subfolder, which could be the symlink.
+        real_root = os.path.realpath(anchor)
+        for f in sorted(root.rglob("*.md")):
+            if not Path(os.path.realpath(f)).is_relative_to(real_root):
+                logger.warning("skipping knowledge file that resolves outside its folder: %s", _sanitize_display_name(f.name))
+                continue
+            rel = f.relative_to(root)
+            # Skills are indexed into a separate collection by
+            # skills_index.seed_builtin_skills; failures are their own corpus.
+            if kind == "builtin" and any(p in rel.parts for p in (SKILLS_DIRNAME, FAILURES_DIRNAME)):
+                continue
+            found[rel] = f
+        return found
+
+    shipped, custom = walk(shipped_root, shipped_root), walk(overlay_root, builtin_overlay_root())
+    files = [
+        CorpusFile(f, shipped_root, rel.as_posix())
+        for rel, f in shipped.items()
+        if rel not in custom and not tombstone_path(overlay_root, rel).exists()
+    ]
+    files += [
+        CorpusFile(
+            f, overlay_root, "custom/" + rel.as_posix(), shipped.get(rel),
+            (shipped_root.name, *rel.parts) if rel in shipped else None,
+        )
+        for rel, f in custom.items()
+    ]
+    return files
+
+
 class _Indexed(NamedTuple):
     total: int
     ids: set[str]
@@ -677,8 +771,7 @@ class _Indexed(NamedTuple):
 
 def _index_seed_files(
     store: ChromaDBStore,
-    files: list[Path],
-    root: Path,
+    files: list[CorpusFile],
     collection: str,
     chunk_type: str,
 ) -> _Indexed:
@@ -693,7 +786,8 @@ def _index_seed_files(
     new_ids: set[str] = set()
     read_sources: set[str] = set()
     indexed_sources: set[str] = set()
-    for md_file in files:
+    for corpus_file in files:
+        md_file = corpus_file.path
         try:
             text = md_file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -708,7 +802,7 @@ def _index_seed_files(
         chunks = chunk_text(text, *default_chunking(text))
         metadatas: list[dict[str, Any]] = [
             {
-                "domain": infer_domain_from_path(md_file, root),
+                "domain": infer_domain_from_path(md_file, corpus_file.root),
                 "filename": md_file.name,
                 "source": str(md_file),
                 "chunk_index": i,
@@ -726,12 +820,6 @@ def _index_seed_files(
     return _Indexed(total, new_ids, read_sources, indexed_sources)
 
 
-def _manifest_keys(files: list[Path], root: Path) -> dict[Path, str]:
-    """Stable per-file keys: the path relative to the corpus root, so neither an
-    install that moved on disk nor two files that share a name collide."""
-    return {f: f.relative_to(root).as_posix() for f in files}
-
-
 def _is_gone(path: Path) -> bool:
     """True only when ``path`` is definitely absent. ``Path.exists()`` reports any
     stat failure (permissions, an unreachable mount, ESTALE) as "missing", and a
@@ -746,27 +834,35 @@ def _is_gone(path: Path) -> bool:
     return False
 
 
-def _claim_rows(rows: dict[str, str | None], files: list[Path], root: Path) -> dict[str, Path]:
-    """Map stored rows (``{row id: stored source}``) to the shipped file each belongs to.
+def _claim_rows(rows: dict[str, str | None], files: list[CorpusFile]) -> dict[str, CorpusFile]:
+    """Map stored rows (``{row id: stored source}``) to the corpus file each belongs to.
 
-    By exact ``source`` path first. Failing that -- the install moved, so the
-    stored path is a stale absolute path (issue #37) -- by *location*: the
-    stored path must be absolute, no longer exist, and end with the same
-    ``<corpus folder>/<domain>/.../<file>`` a shipped file has under ``root``
+    By exact ``source`` path first (an overlay file also owns the rows of the
+    shipped file it shadows). Failing that -- the install moved, so the stored
+    path is a stale absolute path (issue #37) -- by *location*: the stored path
+    must be absolute, no longer exist, and end with the same
+    ``<corpus folder>/<domain>/.../<file>`` a file has under its root
     (``.../builtin/strategy/alpha.md`` under a different prefix). An arbitrary
     stale path that merely shares a filename is never adopted, and neither is a
     row whose own source file is still on disk. Rows nothing claims (API-authored
-    docs whose file went with the image, exotic paths) are left alone.
+    docs whose file went with an old image, exotic paths) are left alone.
     """
-    by_source = {str(f): f for f in files}
-    by_tail = {f.relative_to(root).parts: f for f in files}
-    owner: dict[str, Path] = {}
+    by_source: dict[str, CorpusFile] = {}
+    for cf in files:
+        by_source[str(cf.path)] = cf
+        if cf.shadows is not None:
+            by_source.setdefault(str(cf.shadows), cf)
+    by_location = {(cf.root.name, *cf.path.relative_to(cf.root).parts): cf for cf in files}
+    for cf in files:
+        if cf.shadows_location is not None:
+            by_location.setdefault(cf.shadows_location, cf)
+    owner: dict[str, CorpusFile] = {}
     for row_id, source in rows.items():
         file = by_source.get(source) if source else None
         if file is None and source and Path(source).is_absolute() and _is_gone(Path(source)):
             parts = Path(source).parts
-            for i, part in enumerate(parts[:-1]):
-                if part == root.name and (found := by_tail.get(parts[i + 1 :])) is not None:
+            for i in range(len(parts) - 1):
+                if (found := by_location.get(parts[i:])) is not None:
                     file = found
                     break
         if file is not None:
@@ -776,8 +872,7 @@ def _claim_rows(rows: dict[str, str | None], files: list[Path], root: Path) -> d
 
 def _seed_or_migrate(
     store: ChromaDBStore,
-    files: list[Path],
-    root: Path,
+    files: list[CorpusFile],
     collection: str,
     chunk_type: str,
     force: bool,
@@ -822,10 +917,9 @@ def _seed_or_migrate(
     whole shipped corpus on a laptop, longer on a small VM); the API isn't
     serving until it returns.
     """
-    keys = _manifest_keys(files, root)
     manifest = store.read_seed_manifest(collection)
     stale_rows: dict[str, str | None] = {}
-    owner: dict[str, Path] = {}
+    owner: dict[str, CorpusFile] = {}
     targets = files
     populated = not force and store.get_collection_count(collection) > 0
     if force:
@@ -835,14 +929,24 @@ def _seed_or_migrate(
         stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, "")
     elif populated:
         stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, CHUNKING_VERSION)
-        owner = _claim_rows(stale_rows, files, root)
+        owner = _claim_rows(stale_rows, files)
         stale_files = set(owner.values())
         if manifest is None:
             everything = store.all_chunk_sources(collection, {"type": chunk_type})
             if everything is not None:  # None = unreadable: learn nothing, add nothing
-                present = set(_claim_rows(everything, files, root).values())
-                manifest = {key for f, key in keys.items() if f in present}
-        unseen = {f for f in files if manifest is not None and keys[f] not in manifest}
+                present = set(_claim_rows(everything, files).values())
+                manifest = {f.key for f in files if f in present}
+        unseen = {f for f in files if manifest is not None and f.key not in manifest}
+        # An overlay file that shadows a shipped one replaces that file's rows even
+        # when they are current (a hand-copied or restored overlay, where no PUT
+        # dropped them): claim them so they are removed once the overlay is indexed.
+        shadowing = [f for f in files if f.shadows is not None]
+        shadow_rows = store.all_chunk_sources(collection, {"type": chunk_type}) if shadowing else None
+        if shadow_rows:
+            for row_id, file in _claim_rows(shadow_rows, shadowing).items():
+                if shadow_rows[row_id] != str(file.path):  # a shipped-version row, not the overlay's own
+                    owner[row_id] = file
+                    stale_files.add(file)
         targets = [f for f in files if f in stale_files or f in unseen]
         if stale_rows:
             logger.info(
@@ -856,7 +960,7 @@ def _seed_or_migrate(
             return 0
 
     try:
-        result = _index_seed_files(store, targets, root, collection, chunk_type)
+        result = _index_seed_files(store, targets, collection, chunk_type)
     except Exception:
         if not populated:
             raise
@@ -865,15 +969,15 @@ def _seed_or_migrate(
         return 0
 
     if force:
-        owner = _claim_rows(stale_rows, files, root)
+        owner = _claim_rows(stale_rows, files)
     leftovers = [
         row_id for row_id, file in owner.items()
-        if str(file) in result.indexed and row_id not in result.ids
+        if str(file.path) in result.indexed and row_id not in result.ids
     ]
     if leftovers:
         store.delete_ids(collection, leftovers)
     if not populated or manifest is not None:
-        known = (manifest or set()) | {keys[f] for f in targets if str(f) in result.indexed}
+        known = (manifest or set()) | {f.key for f in targets if str(f.path) in result.indexed}
         if known and known != manifest:
             store.write_seed_manifest(collection, known)
     if populated and result.total:
@@ -891,13 +995,7 @@ async def seed_builtin_knowledge(
         settings = get_settings()
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
 
-    # Skills live under builtin/skills/ but are indexed into a separate
-    # collection by openexecutive.knowledge.skills_index.seed_builtin_skills.
-    files = [
-        f for f in BUILTIN_KNOWLEDGE_PATH.rglob("*.md")
-        if not any(p in f.relative_to(BUILTIN_KNOWLEDGE_PATH).parts for p in ("skills", "failures"))
-    ]
-    return _seed_or_migrate(store, files, BUILTIN_KNOWLEDGE_PATH, ChromaDBStore.BUILTIN_COLLECTION, "builtin", force)
+    return _seed_or_migrate(store, _corpus_files("builtin"), ChromaDBStore.BUILTIN_COLLECTION, "builtin", force)
 
 
 async def seed_failures(
@@ -920,7 +1018,5 @@ async def seed_failures(
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
 
     if not FAILURES_KNOWLEDGE_PATH.is_dir():
-        logger.warning("failures knowledge path not found, skipping: %s", FAILURES_KNOWLEDGE_PATH)
-        return 0
-    files = list(FAILURES_KNOWLEDGE_PATH.rglob("*.md"))
-    return _seed_or_migrate(store, files, FAILURES_KNOWLEDGE_PATH, ChromaDBStore.FAILURES_COLLECTION, "failure_case", force)
+        logger.warning("shipped failures knowledge path not found: %s", FAILURES_KNOWLEDGE_PATH)
+    return _seed_or_migrate(store, _corpus_files("failures"), ChromaDBStore.FAILURES_COLLECTION, "failure_case", force)

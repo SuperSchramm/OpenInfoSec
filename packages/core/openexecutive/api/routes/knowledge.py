@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -10,8 +12,12 @@ from pydantic import BaseModel
 from openexecutive.knowledge.loader import (
     BUILTIN_KNOWLEDGE_PATH,
     DOMAIN_MAP,
+    FAILURES_DIRNAME,
     FAILURES_KNOWLEDGE_PATH,
+    builtin_overlay_root,
+    tombstone_path,
 )
+from openexecutive.knowledge.store import ChromaDBStore
 
 router = APIRouter(prefix="/knowledge")
 
@@ -19,10 +25,18 @@ _VALID_FILENAME = re.compile(r"^[a-zA-Z0-9_\-]+\.md$")
 _VALID_SOURCE_ID = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
+ORIGIN_SHIPPED = "shipped"
+ORIGIN_CUSTOM = "custom"
+ORIGIN_EDITED = "edited"
+
+
 class BuiltinFileMeta(BaseModel):
     domain: str
     filename: str
     size_bytes: int
+    # ORIGIN_SHIPPED (from the image), ORIGIN_CUSTOM (added through the API) or
+    # ORIGIN_EDITED (a shipped doc with an API-saved copy that takes precedence).
+    origin: str = ORIGIN_SHIPPED
 
 
 class BuiltinFileContent(BaseModel):
@@ -60,39 +74,120 @@ def _validate_filename(filename: str) -> None:
         )
 
 
-def _resolve_path(domain: str, filename: str) -> Path:
-    return BUILTIN_KNOWLEDGE_PATH / domain / filename
+# Documents written through the API go to the overlay folder on the persistent
+# volume (issue #36), never into the package directory, which is the container
+# image and is replaced on every deploy. Shipped files are never modified: an
+# edit is an overlay copy that shadows the shipped file, and a delete of a
+# shipped doc is a tombstone in the overlay. Reads prefer the overlay copy.
+
+
+class _DocPaths(NamedTuple):
+    shipped: Path
+    custom: Path
+    tombstone: Path
+
+    def effective(self) -> Path | None:
+        """The file a read should serve: the overlay copy, else the shipped one
+        unless it was deleted through the API."""
+        if self.custom.exists():
+            return self.custom
+        if self.shipped.exists() and not self.tombstone.exists():
+            return self.shipped
+        return None
+
+    def origin(self) -> str:
+        if self.custom.exists():
+            return ORIGIN_EDITED if self.shipped.exists() else ORIGIN_CUSTOM
+        return ORIGIN_SHIPPED
+
+
+def _doc_paths(shipped_root: Path, overlay_root: Path, domain: str, filename: str) -> _DocPaths:
+    paths = _DocPaths(
+        shipped_root / domain / filename,
+        overlay_root / domain / filename,
+        tombstone_path(overlay_root, Path(domain) / filename),
+    )
+    # The overlay is a shared volume, a lower trust boundary than the read-only
+    # image: never follow a symlink out of it (reads, writes or deletes). The
+    # anchor is the TRUE overlay root, not overlay_root (the failures subfolder,
+    # which could itself be the symlink).
+    root = os.path.realpath(builtin_overlay_root())
+    for path in (paths.custom, paths.tombstone):
+        if not Path(os.path.realpath(path)).is_relative_to(root):
+            raise HTTPException(status_code=400, detail="Path escapes the knowledge overlay")
+    return paths
+
+
+def _builtin_paths(domain: str, filename: str) -> _DocPaths:
+    return _doc_paths(BUILTIN_KNOWLEDGE_PATH, builtin_overlay_root(), domain, filename)
+
+
+def _failure_paths(domain: str, filename: str) -> _DocPaths:
+    return _doc_paths(FAILURES_KNOWLEDGE_PATH, builtin_overlay_root() / FAILURES_DIRNAME, domain, filename)
+
+
+def _list_files(shipped_root: Path, overlay_root: Path) -> list[BuiltinFileMeta]:
+    files: list[BuiltinFileMeta] = []
+    for domain in sorted(DOMAIN_MAP.keys()):
+        names: set[str] = set()
+        for root in (shipped_root, overlay_root):
+            if (root / domain).is_dir():
+                names.update(f.name for f in (root / domain).glob("*.md"))
+        for name in sorted(names):
+            try:
+                paths = _doc_paths(shipped_root, overlay_root, domain, name)
+            except HTTPException:  # a symlink out of the overlay: leave it out of the listing
+                continue
+            effective = paths.effective()
+            if effective is not None:
+                files.append(
+                    BuiltinFileMeta(
+                        domain=domain, filename=name, size_bytes=effective.stat().st_size, origin=paths.origin(),
+                    )
+                )
+    return files
+
+
+def _drop_rows(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
+    """Remove the indexed rows of a doc under either of its possible paths (a
+    doc authored before issue #36 may still have rows under its old shipped path)."""
+    for path in (paths.shipped, paths.custom):
+        store.delete_documents(collection=collection, where={"source": str(path)})
+
+
+def _write_overlay(paths: _DocPaths, content: str) -> None:
+    paths.custom.parent.mkdir(parents=True, exist_ok=True)
+    paths.custom.write_text(content, encoding="utf-8")
+    paths.tombstone.unlink(missing_ok=True)  # re-creating a deleted shipped doc
+
+
+def _delete_doc(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
+    _drop_rows(store, collection, paths)
+    paths.custom.unlink(missing_ok=True)
+    if paths.shipped.exists():
+        paths.tombstone.parent.mkdir(parents=True, exist_ok=True)
+        paths.tombstone.touch()
 
 
 def _get_store(request: Request):  # type: ignore[return]
     if hasattr(request.app.state, "store"):
         return request.app.state.store
     from openexecutive.config import get_settings
-    from openexecutive.knowledge.store import ChromaDBStore
 
     return ChromaDBStore(persist_directory=get_settings().vector_store_path)
 
 
 @router.get("/builtin", response_model=BuiltinListResponse)
 async def list_builtin_files() -> BuiltinListResponse:
-    files: list[BuiltinFileMeta] = []
-    for domain in sorted(DOMAIN_MAP.keys()):
-        domain_dir = BUILTIN_KNOWLEDGE_PATH / domain
-        if not domain_dir.exists():
-            continue
-        for f in sorted(domain_dir.glob("*.md")):
-            files.append(
-                BuiltinFileMeta(domain=domain, filename=f.name, size_bytes=f.stat().st_size)
-            )
-    return BuiltinListResponse(files=files)
+    return BuiltinListResponse(files=_list_files(BUILTIN_KNOWLEDGE_PATH, builtin_overlay_root()))
 
 
 @router.get("/builtin/{domain}/{filename}", response_model=BuiltinFileContent)
 async def get_builtin_file(domain: str, filename: str) -> BuiltinFileContent:
     _validate_domain(domain)
     _validate_filename(filename)
-    path = _resolve_path(domain, filename)
-    if not path.exists():
+    path = _builtin_paths(domain, filename).effective()
+    if path is None:
         raise HTTPException(status_code=404, detail="File not found")
     return BuiltinFileContent(domain=domain, filename=filename, content=path.read_text(encoding="utf-8"))
 
@@ -101,17 +196,17 @@ async def get_builtin_file(domain: str, filename: str) -> BuiltinFileContent:
 async def create_builtin_file(body: BuiltinFileWrite, request: Request) -> BuiltinWriteResponse:
     _validate_domain(body.domain)
     _validate_filename(body.filename)
-    path = _resolve_path(body.domain, body.filename)
-    if path.exists():
+    paths = _builtin_paths(body.domain, body.filename)
+    if paths.effective() is not None:
         raise HTTPException(status_code=409, detail="File already exists. Use PUT to update.")
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body.content, encoding="utf-8")
 
     from openexecutive.knowledge.loader import ingest_builtin_file
     from openexecutive.knowledge.review_store import ContentType, ReviewStore
 
-    chunks = await ingest_builtin_file(path, _get_store(request))
+    store = _get_store(request)
+    _write_overlay(paths, body.content)
+    _drop_rows(store, ChromaDBStore.BUILTIN_COLLECTION, paths)  # stale rows of a doc removed earlier
+    chunks = await ingest_builtin_file(paths.custom, store)
 
     ReviewStore().register(
         item_id=f"builtin:{body.domain}:{body.filename}",
@@ -129,21 +224,21 @@ async def update_builtin_file(
 ) -> BuiltinWriteResponse:
     _validate_domain(domain)
     _validate_filename(filename)
-    path = _resolve_path(domain, filename)
-    if not path.exists():
+    paths = _builtin_paths(domain, filename)
+    if paths.effective() is None:
         raise HTTPException(status_code=404, detail="File not found. Use POST to create.")
 
     from openexecutive.knowledge.loader import ingest_builtin_file
     from openexecutive.knowledge.review_store import ContentType, ReviewStore
-    from openexecutive.knowledge.store import ChromaDBStore
 
     store = _get_store(request)
-    store.delete_documents(
-        collection=ChromaDBStore.BUILTIN_COLLECTION,
-        where={"source": str(path)},
-    )
-    path.write_text(body.content, encoding="utf-8")
-    chunks = await ingest_builtin_file(path, store)
+    # The edit is saved as an overlay copy (the shipped file is left alone), so
+    # the shipped doc's rows and any earlier overlay rows are replaced -- but only
+    # AFTER the write succeeds: a full or read-only volume must not leave the doc
+    # with no rows.
+    _write_overlay(paths, body.content)
+    _drop_rows(store, ChromaDBStore.BUILTIN_COLLECTION, paths)
+    chunks = await ingest_builtin_file(paths.custom, store)
 
     rs = ReviewStore()
     item_id = f"builtin:{domain}:{filename}"
@@ -220,7 +315,6 @@ def _cache_mtime(cache_dir: Path) -> float | None:
 async def list_external_sources(request: Request) -> ExternalSourcesResponse:
     """List every source declared in sources.yaml with live ingest stats."""
     from openexecutive.knowledge.external_sources import load_manifest
-    from openexecutive.knowledge.store import ChromaDBStore
 
     manifest = load_manifest()
     store = _get_store(request)
@@ -281,7 +375,6 @@ async def peek_external_source(
 ) -> ExternalPeekResponse:
     """Return the first N indexed chunks of a source so a human can spot-check them."""
     from openexecutive.knowledge.external_sources import load_manifest
-    from openexecutive.knowledge.store import ChromaDBStore
 
     _validate_source_id(source_id)
     if not any(src.id == source_id for src in load_manifest()):
@@ -315,19 +408,13 @@ async def peek_external_source(
 async def delete_builtin_file(domain: str, filename: str, request: Request) -> dict:
     _validate_domain(domain)
     _validate_filename(filename)
-    path = _resolve_path(domain, filename)
-    if not path.exists():
+    paths = _builtin_paths(domain, filename)
+    if paths.effective() is None:
         raise HTTPException(status_code=404, detail="File not found")
 
     from openexecutive.knowledge.review_store import ReviewStore
-    from openexecutive.knowledge.store import ChromaDBStore
 
-    store = _get_store(request)
-    store.delete_documents(
-        collection=ChromaDBStore.BUILTIN_COLLECTION,
-        where={"source": str(path)},
-    )
-    path.unlink()
+    _delete_doc(_get_store(request), ChromaDBStore.BUILTIN_COLLECTION, paths)
     ReviewStore().delete_item(f"builtin:{domain}:{filename}")
     return {"deleted": filename}
 
@@ -340,30 +427,18 @@ async def delete_builtin_file(domain: str, filename: str, request: Request) -> d
 # ---------------------------------------------------------------------------
 
 
-def _resolve_failure_path(domain: str, filename: str) -> Path:
-    return FAILURES_KNOWLEDGE_PATH / domain / filename
-
 
 @router.get("/failures", response_model=BuiltinListResponse)
 async def list_failure_files() -> BuiltinListResponse:
-    files: list[BuiltinFileMeta] = []
-    for domain in sorted(DOMAIN_MAP.keys()):
-        domain_dir = FAILURES_KNOWLEDGE_PATH / domain
-        if not domain_dir.exists():
-            continue
-        for f in sorted(domain_dir.glob("*.md")):
-            files.append(
-                BuiltinFileMeta(domain=domain, filename=f.name, size_bytes=f.stat().st_size)
-            )
-    return BuiltinListResponse(files=files)
+    return BuiltinListResponse(files=_list_files(FAILURES_KNOWLEDGE_PATH, builtin_overlay_root() / FAILURES_DIRNAME))
 
 
 @router.get("/failures/{domain}/{filename}", response_model=BuiltinFileContent)
 async def get_failure_file(domain: str, filename: str) -> BuiltinFileContent:
     _validate_domain(domain)
     _validate_filename(filename)
-    path = _resolve_failure_path(domain, filename)
-    if not path.exists():
+    path = _failure_paths(domain, filename).effective()
+    if path is None:
         raise HTTPException(status_code=404, detail="File not found")
     return BuiltinFileContent(
         domain=domain, filename=filename, content=path.read_text(encoding="utf-8")
@@ -374,19 +449,18 @@ async def get_failure_file(domain: str, filename: str) -> BuiltinFileContent:
 async def create_failure_file(body: BuiltinFileWrite, request: Request) -> BuiltinWriteResponse:
     _validate_domain(body.domain)
     _validate_filename(body.filename)
-    path = _resolve_failure_path(body.domain, body.filename)
-    if path.exists():
+    paths = _failure_paths(body.domain, body.filename)
+    if paths.effective() is not None:
         raise HTTPException(status_code=409, detail="File already exists. Use PUT to update.")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body.content, encoding="utf-8")
-
     from openexecutive.knowledge.loader import ingest_builtin_file
-    from openexecutive.knowledge.store import ChromaDBStore
 
+    store = _get_store(request)
+    _write_overlay(paths, body.content)
+    _drop_rows(store, ChromaDBStore.FAILURES_COLLECTION, paths)  # stale rows of a doc removed earlier
     chunks = await ingest_builtin_file(
-        path,
-        _get_store(request),
+        paths.custom,
+        store,
         collection=ChromaDBStore.FAILURES_COLLECTION,
         chunk_type="failure_case",
     )
@@ -399,21 +473,17 @@ async def update_failure_file(
 ) -> BuiltinWriteResponse:
     _validate_domain(domain)
     _validate_filename(filename)
-    path = _resolve_failure_path(domain, filename)
-    if not path.exists():
+    paths = _failure_paths(domain, filename)
+    if paths.effective() is None:
         raise HTTPException(status_code=404, detail="File not found. Use POST to create.")
 
     from openexecutive.knowledge.loader import ingest_builtin_file
-    from openexecutive.knowledge.store import ChromaDBStore
 
     store = _get_store(request)
-    store.delete_documents(
-        collection=ChromaDBStore.FAILURES_COLLECTION,
-        where={"source": str(path)},
-    )
-    path.write_text(body.content, encoding="utf-8")
+    _write_overlay(paths, body.content)  # write first; see update_builtin_file
+    _drop_rows(store, ChromaDBStore.FAILURES_COLLECTION, paths)
     chunks = await ingest_builtin_file(
-        path,
+        paths.custom,
         store,
         collection=ChromaDBStore.FAILURES_COLLECTION,
         chunk_type="failure_case",
@@ -425,18 +495,11 @@ async def update_failure_file(
 async def delete_failure_file(domain: str, filename: str, request: Request) -> dict:
     _validate_domain(domain)
     _validate_filename(filename)
-    path = _resolve_failure_path(domain, filename)
-    if not path.exists():
+    paths = _failure_paths(domain, filename)
+    if paths.effective() is None:
         raise HTTPException(status_code=404, detail="File not found")
 
-    from openexecutive.knowledge.store import ChromaDBStore
-
-    store = _get_store(request)
-    store.delete_documents(
-        collection=ChromaDBStore.FAILURES_COLLECTION,
-        where={"source": str(path)},
-    )
-    path.unlink()
+    _delete_doc(_get_store(request), ChromaDBStore.FAILURES_COLLECTION, paths)
     return {"deleted": filename}
 
 
@@ -543,7 +606,6 @@ async def search_knowledge(
     for tuning the knowledge base offline.
     """
     from openexecutive.knowledge.retriever import DOMAIN_ALIASES, GENERAL_DOMAIN, _with_general
-    from openexecutive.knowledge.store import ChromaDBStore
 
     if not body.query.strip():
         raise HTTPException(status_code=400, detail="query must be non-empty")
@@ -712,7 +774,6 @@ async def purge_attachments(request: Request) -> AttachmentPurgeResponse:
     every other attachment currently indexed — only "purge everything" or
     "wait for the TTL."
     """
-    from openexecutive.knowledge.store import ChromaDBStore
 
     store = _get_store(request)
     purged = store.get_collection_count(ChromaDBStore.ATTACHMENT_COLLECTION)

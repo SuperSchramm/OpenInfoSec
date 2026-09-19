@@ -71,3 +71,15 @@ def isolate_settings_from_dotenv(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setitem(Settings.model_config, "env_file", None)
     yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_builtin_overlay(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory):
+    """Point the writable built-in overlay (issue #36) at a per-test temp dir.
+
+    Its default sits next to the vector store, i.e. the repo root in a dev
+    checkout, so without this any test that exercises the built-in CRUD routes
+    would write into the developer's real ``builtin_custom`` folder.
+    """
+    monkeypatch.setenv("BUILTIN_OVERLAY_PATH", str(tmp_path_factory.mktemp("builtin_overlay")))
+    yield

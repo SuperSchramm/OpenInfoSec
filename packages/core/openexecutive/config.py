@@ -82,6 +82,12 @@ class Settings(BaseSettings):
         return self
 
     vector_store_path: Path = Field(_ROOT / "chroma_db", alias="VECTOR_STORE_PATH")
+    # Where documents authored or edited through POST/PUT /knowledge/builtin and
+    # /knowledge/failures are written (issue #36). The shipped corpus lives
+    # inside the package (the container image, replaced on every deploy), so
+    # writes there vanish on redeploy while their vector-store rows survive on
+    # the volume. Default: a `builtin_custom` folder next to the vector store.
+    builtin_overlay_path: Path | None = Field(None, alias="BUILTIN_OVERLAY_PATH")
     company_profile_path: Path = Field(
         _ROOT / "company" / "profile.yaml", alias="COMPANY_PROFILE_PATH"
     )

@@ -531,7 +531,28 @@ knowledge:
   collections:
     - name: BUILTIN
       what: |
-        Curated MBA-style domain knowledge shipped with the repo, chunked with
+        Curated MBA-style domain knowledge shipped with the repo, PLUS a
+        writable overlay (issue #36): documents created or edited through
+        POST/PUT /knowledge/builtin and /knowledge/failures are saved under
+        `builtin_custom/` (`BUILTIN_OVERLAY_PATH`, default next to the vector
+        store, i.e. on the persistent volume in Fly/Docker) in the same
+        `<domain>/<file>.md` layout, failure cases under `failures/`, never
+        into the package directory, which is the container image and is
+        replaced on every deploy. Shipped files are never modified: reads prefer
+        the overlay copy; an edited shipped doc is an overlay copy that
+        shadows it (its rows are replaced); deleting a shipped doc drops its
+        rows and leaves a `.deleted/<domain>/<file>.md.deleted` tombstone in
+        the overlay so it stays deleted (unlisted, unread, not re-seeded)
+        across redeploys, and re-creating it removes the tombstone. Overlay
+        paths are realpath-checked against the true overlay root (for both
+        the routes and the seed walk) so a symlink can't lead out of it. An
+        overlay copy or tombstone shadows the shipped doc permanently: a later
+        image that ships an updated version of that path is ignored until the
+        overlay entry is deleted (a re-POST/PUT replaces it). The list endpoints return
+        `origin`: `shipped` / `custom` / `edited`. `loader._corpus_files`
+        walks both roots for seeding (manifest keys for overlay files are
+        prefixed `custom/`). Docs API-authored before this change lost their
+        files with an earlier image and stay as unclaimed rows. Chunked with
         the fine profile (120 words / 20 overlap, `loader.FINE_CHUNK_*`; issue
         #32) so each chunk fits the embedding model's 256-token window. Before
         that, 199 of 218 chunks were longer than the window (median ~750

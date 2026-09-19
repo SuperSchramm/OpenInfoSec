@@ -31,6 +31,7 @@ docs/source-material/
 # Vector store
 *.chroma/
 chroma_db/
+builtin_custom/
 
 # OER cache (downloaded by `openexecutive ingest-oer`)
 packages/core/openexecutive/knowledge/external/
