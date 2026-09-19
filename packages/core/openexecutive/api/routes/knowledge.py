@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from openexecutive.config import get_settings
 from openexecutive.knowledge import overlay_fs
@@ -26,9 +26,9 @@ from openexecutive.knowledge.store import ChromaDBStore
 
 router = APIRouter(prefix="/knowledge")
 
-# Bounded so the overlay's temp file (".<name>.<12 hex>.tmp") still fits a 255-byte
-# filesystem name limit.
-_VALID_FILENAME = re.compile(r"^[a-zA-Z0-9_\-]{1,120}\.md$")
+# Bounded (overlay_fs.MAX_DOC_STEM_CHARS) so the overlay's temp file still fits a
+# 255-byte filesystem name limit.
+_VALID_FILENAME = re.compile(rf"^[a-zA-Z0-9_\-]{{1,{overlay_fs.MAX_DOC_STEM_CHARS}}}\.md$")
 _VALID_SOURCE_ID = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
@@ -55,7 +55,16 @@ class BuiltinFileContent(BaseModel):
 class BuiltinFileWrite(BaseModel):
     domain: str
     filename: str
+    # A blank document is indexed as nothing, yet would still cost an inode and a
+    # block against a byte budget it never touches (issue #40).
     content: str = Field(max_length=MAX_KNOWLEDGE_DOC_CHARS)
+
+    @field_validator("content")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be empty")
+        return value
 
 
 class BuiltinListResponse(BaseModel):
@@ -165,7 +174,11 @@ def _drop_rows(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
     """
     for path in (paths.shipped, paths.custom):
         store.delete_documents(collection=collection, where={"source": str(path)})
-        if store.all_chunk_sources(collection, {"source": str(path)}):
+        # None means "could not read the collection", which is NOT the same as "no
+        # rows": delete_documents creates the collection if it is missing, so an
+        # unreadable one here is a real failure, not a fresh install.
+        remaining = store.all_chunk_sources(collection, {"source": str(path)})
+        if remaining is None or remaining:
             raise HTTPException(status_code=500, detail="Indexed content could not be removed; retry")
 
 
@@ -180,7 +193,6 @@ def _overlay_error(exc: OSError) -> HTTPException:
 
 def _write_overlay(paths: _DocPaths, content: str) -> None:
     root = builtin_overlay_root()
-    overlay_fs.sweep_stale_temp(root)
     custom_rel, tombstone_rel = paths.custom.relative_to(root), paths.tombstone.relative_to(root)
     previous = overlay_fs.file_size(root, custom_rel)
     new_size = len(content.encode("utf-8"))
@@ -191,7 +203,8 @@ def _write_overlay(paths: _DocPaths, content: str) -> None:
     # rewrite costs nothing against it (issue #39 residual).
     # Only growth can breach the budget: shrinking an edit must stay possible even
     # when the overlay is already over a budget that was lowered later.
-    if new_size > previous and overlay_fs.total_bytes(root) - previous + new_size > get_settings().builtin_overlay_max_bytes:
+    used = overlay_fs.total_bytes(root, sweep_stale=True)  # one walk; also reclaims stale temp files
+    if new_size > previous and used - previous + new_size > get_settings().builtin_overlay_max_bytes:
         raise HTTPException(status_code=413, detail="The knowledge overlay is full")
     existed = paths.custom.exists()
     try:
@@ -207,17 +220,37 @@ def _write_overlay(paths: _DocPaths, content: str) -> None:
         raise _overlay_error(exc) from exc
 
 
+def _drop_new_doc_on_failure(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
+    """Clear stale rows for a doc being CREATED; if that fails, remove the file just
+    written, so the caller's retry is not met with 409 for a doc that has no rows."""
+    try:
+        _drop_rows(store, collection, paths)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            overlay_fs.unlink(builtin_overlay_root(), paths.custom.relative_to(builtin_overlay_root()))
+        raise
+
+
 def _delete_doc(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
     root = builtin_overlay_root()
-    custom_rel = paths.custom.relative_to(root)
+    custom_rel, tombstone_rel = paths.custom.relative_to(root), paths.tombstone.relative_to(root)
+    created_tombstone = False
     try:
         # Tombstone first: if it can't be written nothing has changed. Then the
-        # rows, then the overlay copy. A failure in the last two leaves the copy on
-        # disk, so the doc is still visible and a retry of the DELETE works (the
-        # reverse order would leave rows for a doc the retry reports as gone).
+        # rows, then the overlay copy. If the rows can't be removed the tombstone
+        # is taken back, otherwise a shipped doc would vanish from the listing while
+        # its chunks stay indexed and the retry would report 404. A failure removing
+        # the overlay copy leaves it on disk, so the doc is still visible and a
+        # retry of the DELETE works.
         if paths.shipped.exists():
-            overlay_fs.touch(root, paths.tombstone.relative_to(root))
-        _drop_rows(store, collection, paths)
+            created_tombstone = overlay_fs.touch(root, tombstone_rel)  # atomic: only the creator may roll back
+        try:
+            _drop_rows(store, collection, paths)
+        except BaseException:
+            if created_tombstone:
+                with contextlib.suppress(OSError):
+                    overlay_fs.unlink(root, tombstone_rel)
+            raise
         overlay_fs.unlink(root, custom_rel)
     except OSError as exc:
         raise _overlay_error(exc) from exc
@@ -259,7 +292,7 @@ async def create_builtin_file(body: BuiltinFileWrite, request: Request) -> Built
 
     store = _get_store(request)
     _write_overlay(paths, body.content)
-    _drop_rows(store, ChromaDBStore.BUILTIN_COLLECTION, paths)  # stale rows of a doc removed earlier
+    _drop_new_doc_on_failure(store, ChromaDBStore.BUILTIN_COLLECTION, paths)  # stale rows of a doc removed earlier
     chunks = await ingest_builtin_file(paths.custom, store)
 
     ReviewStore().register(
@@ -511,7 +544,7 @@ async def create_failure_file(body: BuiltinFileWrite, request: Request) -> Built
 
     store = _get_store(request)
     _write_overlay(paths, body.content)
-    _drop_rows(store, ChromaDBStore.FAILURES_COLLECTION, paths)  # stale rows of a doc removed earlier
+    _drop_new_doc_on_failure(store, ChromaDBStore.FAILURES_COLLECTION, paths)  # stale rows of a doc removed earlier
     chunks = await ingest_builtin_file(
         paths.custom,
         store,

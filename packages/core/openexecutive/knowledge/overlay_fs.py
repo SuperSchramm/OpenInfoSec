@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import secrets
 import stat
 import time
@@ -75,17 +76,28 @@ def _open_parent(root: Path, parts: tuple[str, ...], create: bool) -> int | None
         raise
 
 
-def _open_marker(parent_fd: int, name: str) -> int:
-    """Open (creating if needed) a plain single-link regular file for a marker, refusing anything else.
+def _open_marker(parent_fd: int, name: str) -> tuple[int, bool]:
+    """Open a plain single-link regular file for a marker; (fd, created_by_this_call).
 
-    ``O_NOFOLLOW`` stops symlinks; a hardlink or a FIFO planted at the path is
-    caught by the ``fstat`` below. ``O_NONBLOCK`` keeps a FIFO from blocking the
-    open forever.
+    Creation uses ``O_EXCL`` so "did I create it?" is decided atomically by the
+    filesystem, not by a separate existence check (two concurrent callers can
+    never both believe they created it). An existing file is reopened without
+    ``O_CREAT``. ``O_NOFOLLOW`` stops symlinks; a hardlink or a FIFO planted at the
+    path is caught by the ``fstat``; ``O_NONBLOCK`` keeps a FIFO from blocking.
     """
+    created = True
     try:
         fd = os.open(
-            name, os.O_WRONLY | os.O_CREAT | _NOFOLLOW | os.O_NONBLOCK, FILE_MODE, dir_fd=parent_fd,
+            name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | os.O_NONBLOCK, FILE_MODE, dir_fd=parent_fd,
         )
+    except FileExistsError:
+        created = False
+        try:
+            fd = os.open(name, os.O_WRONLY | _NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        except OSError as exc:
+            if exc.errno in _UNSAFE_ERRNOS or exc.errno == errno.ENXIO:
+                raise UnsafeOverlayPath(f"unsafe overlay file: {name!r}") from exc
+            raise
     except OSError as exc:
         if exc.errno in _UNSAFE_ERRNOS or exc.errno == errno.ENXIO:
             raise UnsafeOverlayPath(f"unsafe overlay file: {name!r}") from exc
@@ -97,7 +109,7 @@ def _open_marker(parent_fd: int, name: str) -> int:
     except BaseException:
         os.close(fd)
         raise
-    return fd
+    return fd, created
 
 
 def _replace_file(parent_fd: int, name: str, content: str) -> None:
@@ -118,13 +130,21 @@ def _replace_file(parent_fd: int, name: str, content: str) -> None:
     tmp = f".{name}.{secrets.token_hex(6)}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, FILE_MODE, dir_fd=parent_fd)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
+        try:
+            _write_all(fd, content.encode("utf-8"))
+        finally:
+            os.close(fd)  # this function owns the descriptor throughout: no fdopen, no double close
         os.rename(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp, dir_fd=parent_fd)
         raise
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def _check_rel(rel: Path) -> None:
@@ -142,21 +162,18 @@ def _require(fd: int | None) -> int:
     return fd
 
 
-def _create(root: Path, rel: Path, content: str | None) -> None:
-    """Create ``root/rel`` (parents too) symlink-safely; write ``content`` (truncating) unless it is None."""
+def _create(root: Path, rel: Path, content: str) -> None:
+    """Create or atomically replace ``root/rel`` (parents too), symlink-safely."""
     _check_rel(rel)
     root.mkdir(parents=True, exist_ok=True)
     if not _SAFE:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8") if content is not None else target.touch()
+        target.write_text(content, encoding="utf-8")
         return
     parent = _require(_open_parent(root, rel.parts, create=True))
     try:
-        if content is None:
-            os.close(_open_marker(parent, rel.parts[-1]))
-        else:
-            _replace_file(parent, rel.parts[-1], content)
+        _replace_file(parent, rel.parts[-1], content)
     finally:
         os.close(parent)
 
@@ -166,9 +183,26 @@ def write_text(root: Path, rel: Path, content: str) -> None:
     _create(root, rel, content)
 
 
-def touch(root: Path, rel: Path) -> None:
-    """Create an empty marker file at ``root/rel`` (parents created), symlink-safe."""
-    _create(root, rel, None)
+def touch(root: Path, rel: Path) -> bool:
+    """Create an empty marker at ``root/rel`` (parents created), symlink-safe.
+
+    Returns True if THIS call created it, False if it already existed.
+    """
+    _check_rel(rel)
+    root.mkdir(parents=True, exist_ok=True)
+    if not _SAFE:
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        existed = target.exists()
+        target.touch()
+        return not existed
+    parent = _require(_open_parent(root, rel.parts, create=True))
+    try:
+        fd, created = _open_marker(parent, rel.parts[-1])
+        os.close(fd)
+        return created
+    finally:
+        os.close(parent)
 
 
 def unlink(root: Path, rel: Path) -> None:
@@ -198,39 +232,45 @@ def file_size(root: Path, rel: Path) -> int:
     return st.st_size if stat.S_ISREG(st.st_mode) else 0
 
 
-def total_bytes(root: Path) -> int:
-    """Bytes held by regular files under ``root`` (symlinks are not followed or counted)."""
-    total = 0
-    for dirpath, _dirs, files in os.walk(root, followlinks=False):
-        for name in files:
-            with contextlib.suppress(OSError):
-                st = os.lstat(os.path.join(dirpath, name))
-                if not os.path.islink(os.path.join(dirpath, name)):
-                    total += st.st_size
-    return total
-
-
 STALE_TEMP_SECONDS = 3600
+# Longest document name (without ".md") the API accepts. Bounded so that the temp
+# file _replace_file makes beside it, ".<name>.md.<12 hex>.tmp" (name + 20
+# characters), always fits a 255-byte filesystem name limit.
+MAX_DOC_STEM_CHARS = 120
+# Exactly the name _replace_file gives its temp files. The sweep must never touch
+# anything else in a directory an operator may share.
+_TEMP_NAME = re.compile(rf"\.[A-Za-z0-9_\-]{{1,{MAX_DOC_STEM_CHARS}}}\.md\.[0-9a-f]{{12}}\.tmp")
 
 
-def sweep_stale_temp(root: Path) -> int:
-    """Delete temp files (``.<name>.<hex>.tmp``) that a killed process left behind.
+def _walk_overlay(root: Path, sweep_stale: bool) -> tuple[int, int]:
+    """One pass over ``root``: (bytes held by regular files, stale temp files removed).
 
-    ``_replace_file`` cleans up after every in-process error, but a SIGKILL or an
-    OOM between creating the temp file and renaming it leaves one, and it would
-    otherwise count against the byte budget forever while staying invisible to the
-    ``*.md`` walks. Only files older than ``STALE_TEMP_SECONDS`` go, so a write in
-    flight is never touched. Returns how many were removed.
+    Symlinks are not followed or counted. With ``sweep_stale``, temp files older
+    than ``STALE_TEMP_SECONDS`` are deleted and not counted; one that cannot be
+    deleted still counts, since it still occupies the volume.
     """
-    removed = 0
+    total = removed = 0
     cutoff = time.time() - STALE_TEMP_SECONDS
     for dirpath, _dirs, files in os.walk(root, followlinks=False):
         for name in files:
-            if name.startswith(".") and name.endswith(".tmp"):
-                full = os.path.join(dirpath, name)
-                with contextlib.suppress(OSError):
-                    st = os.lstat(full)
-                    if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
-                        os.unlink(full)
-                        removed += 1
-    return removed
+            full = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(full)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if sweep_stale and st.st_mtime < cutoff and _TEMP_NAME.fullmatch(name):
+                try:
+                    os.unlink(full)
+                    removed += 1
+                    continue
+                except OSError:
+                    pass
+            total += st.st_size
+    return total, removed
+
+
+def total_bytes(root: Path, *, sweep_stale: bool = False) -> int:
+    """Bytes held by regular files under ``root``; optionally sweeping stale temp files in the same pass."""
+    return _walk_overlay(root, sweep_stale)[0]

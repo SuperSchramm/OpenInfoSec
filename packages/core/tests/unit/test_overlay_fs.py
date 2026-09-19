@@ -526,14 +526,14 @@ def test_a_stale_temp_file_left_by_a_killed_writer_is_swept_but_a_fresh_one_is_n
     import time
 
     (tmp_path / "a").mkdir()
-    stale, fresh, real = tmp_path / "a" / ".x.md.aaaa.tmp", tmp_path / "a" / ".y.md.bbbb.tmp", tmp_path / "a" / "x.md"
+    stale, fresh, real = tmp_path / "a" / ".x.md.aaaaaaaaaaaa.tmp", tmp_path / "a" / ".y.md.bbbbbbbbbbbb.tmp", tmp_path / "a" / "x.md"
     for f in (stale, fresh, real):
         f.write_text("data", encoding="utf-8")
     old = time.time() - overlay_fs.STALE_TEMP_SECONDS - 60
     os.utime(stale, (old, old))
     os.utime(real, (old, old))
 
-    assert overlay_fs.sweep_stale_temp(tmp_path) == 1
+    assert overlay_fs._walk_overlay(tmp_path, True)[1] == 1
 
     assert not stale.exists() and fresh.exists() and real.exists()
 
@@ -544,10 +544,224 @@ def test_writing_sweeps_stale_temp_files_so_they_stop_counting_against_the_budge
     client, overlay = env["client"], env["overlay"]
     monkeypatch.setenv("BUILTIN_OVERLAY_MAX_BYTES", "1000")
     (overlay / "strategy").mkdir(parents=True)
-    ghost = overlay / "strategy" / ".gone.md.cccc.tmp"
+    ghost = overlay / "strategy" / ".gone.md.cccccccccccc.tmp"
     ghost.write_bytes(b"x" * 900)  # left behind by a killed process
     old = time.time() - overlay_fs.STALE_TEMP_SECONDS - 60
     os.utime(ghost, (old, old))
 
     assert _post(client, "one.md", "a" * 600).status_code == 200, "the ghost no longer eats the quota"
+    assert not ghost.exists()
+
+
+# ---- issue #40: follow-ups from the #39 final review
+
+def test_the_sweep_only_touches_files_named_like_our_own_temp_files(tmp_path: Path) -> None:
+    import time
+
+    old = time.time() - overlay_fs.STALE_TEMP_SECONDS - 60
+    others = [tmp_path / ".cache.tmp", tmp_path / ".x.md.zzzz.tmp", tmp_path / "x.md.aaaaaaaaaaaa.tmp", tmp_path / ".x.txt.aaaaaaaaaaaa.tmp"]
+    ours = tmp_path / ".x.md.aaaaaaaaaaaa.tmp"
+    for f in [*others, ours]:
+        f.write_text("data", encoding="utf-8")
+        os.utime(f, (old, old))
+    overlay_fs.total_bytes(tmp_path, sweep_stale=True)
+    assert not ours.exists()
+    assert all(f.exists() for f in others), "unrelated files in a shared directory are never swept"
+
+
+def test_total_bytes_without_sweep_counts_but_never_deletes_stale_temp_files(tmp_path: Path) -> None:
+    import time
+
+    ghost = tmp_path / ".x.md.aaaaaaaaaaaa.tmp"
+    ghost.write_bytes(b"12345")
+    old = time.time() - overlay_fs.STALE_TEMP_SECONDS - 60
+    os.utime(ghost, (old, old))
+    assert overlay_fs.total_bytes(tmp_path) == 5 and ghost.exists()
+
+
+def test_an_unreadable_collection_is_a_failed_delete_not_a_successful_one(env: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """all_chunk_sources returns None when the collection can't be read; that is not 'no rows'."""
+    client, store, overlay = env["client"], env["store"], env["overlay"]
+    _post(client, "mine.md", "hello world " * 30)
+    monkeypatch.setattr(store, "all_chunk_sources", lambda *a, **k: None)
+
+    assert client.delete("/knowledge/builtin/strategy/mine.md").status_code == 500
+    assert (overlay / "strategy" / "mine.md").exists(), "the file stays, so the DELETE can be retried"
+
+
+def test_a_failed_row_removal_takes_the_tombstone_back_so_a_shipped_doc_stays_listed(env: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, store, overlay = env["client"], env["store"], env["overlay"]
+    real, real_delete = store.all_chunk_sources, store.delete_documents
+    monkeypatch.setattr(store, "delete_documents", lambda *a, **k: None)  # a swallowed failure: rows stay
+
+    assert client.delete("/knowledge/builtin/strategy/shipped_doc.md").status_code == 500
+
+    assert not (overlay / ".deleted" / "strategy" / "shipped_doc.md.deleted").exists(), "tombstone rolled back"
+    assert "shipped_doc.md" in {f["filename"] for f in client.get("/knowledge/builtin").json()["files"]}
+    assert real(ChromaDBStore.BUILTIN_COLLECTION, {"type": "builtin"}), "and its rows are still indexed"
+    monkeypatch.setattr(store, "delete_documents", real_delete)
+    assert client.delete("/knowledge/builtin/strategy/shipped_doc.md").status_code == 200, "the retry works (not a 404)"
+
+
+def test_a_tombstone_that_already_existed_is_not_removed_by_a_failed_retry(env: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a tombstone this call created may be rolled back."""
+    client, store, overlay = env["client"], env["store"], env["overlay"]
+    client.put("/knowledge/builtin/strategy/shipped_doc.md", json={"domain": "strategy", "filename": "shipped_doc.md", "content": "edited " * 30})
+    tomb = overlay / ".deleted" / "strategy" / "shipped_doc.md.deleted"
+    tomb.parent.mkdir(parents=True, exist_ok=True)
+    tomb.touch()  # already there
+    monkeypatch.setattr(store, "delete_documents", lambda *a, **k: None)
+
+    assert client.delete("/knowledge/builtin/strategy/shipped_doc.md").status_code == 500
+    assert tomb.exists()
+
+
+def test_an_empty_document_is_rejected(env: dict[str, Any]) -> None:
+    client = env["client"]
+    assert _post(client, "empty.md", "").status_code == 422
+    assert client.put("/knowledge/builtin/strategy/shipped_doc.md", json={"domain": "strategy", "filename": "shipped_doc.md", "content": ""}).status_code == 422
+    assert not (env["overlay"] / "strategy" / "empty.md").exists()
+
+
+def test_a_handler_that_already_started_responding_never_gets_a_second_response() -> None:
+    from openexecutive.api.body_limit import BodyLimitMiddleware
+
+    class Streams:
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            with pytest.raises(Exception):  # noqa: B017 -- the limit trips while reading the body
+                await receive()
+            await send({"type": "http.response.body", "body": b"partial"})
+
+    sent: list[Any] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"x" * 500, "more_body": False}
+
+    async def send(message: Any) -> None:
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/knowledge/builtin", "headers": []}
+    asyncio.run(BodyLimitMiddleware(Streams(), {"/knowledge/builtin": 100})(scope, receive, send))
+
+    assert [m["type"] for m in sent].count("http.response.start") == 1, "one response start, never two"
+
+
+def test_a_write_that_fails_leaks_no_descriptor_and_closes_each_one_exactly_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[int] = []
+    closes: list[int] = []
+    real_open, real_close = os.open, os.close
+
+    def tracking_open(*a: Any, **k: Any) -> int:
+        fd = real_open(*a, **k)
+        opened.append(fd)
+        return fd
+
+    def tracking_close(fd: int) -> None:
+        closes.append(fd)
+        real_close(fd)
+
+    def failing_write(*_a: Any, **_k: Any) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(overlay_fs.os, "open", tracking_open)
+    monkeypatch.setattr(overlay_fs.os, "close", tracking_close)
+    monkeypatch.setattr(overlay_fs.os, "write", failing_write)
+    with pytest.raises(OSError):
+        overlay_fs.write_text(tmp_path, Path("a/x.md"), "x")
+
+    assert sorted(closes) == sorted(opened), "every descriptor closed, none twice"
+    assert [p.name for p in (tmp_path / "a").iterdir()] == [], "and the temp file is gone"
+
+
+def test_a_partial_write_is_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_write = os.write
+
+    def dribble(fd: int, data: Any) -> int:
+        return real_write(fd, bytes(data)[:3])  # the kernel accepts three bytes at a time
+
+    monkeypatch.setattr(overlay_fs.os, "write", dribble)
+    overlay_fs.write_text(tmp_path, Path("a/x.md"), "the whole document, not just a prefix")
+    assert (tmp_path / "a" / "x.md").read_text(encoding="utf-8") == "the whole document, not just a prefix"
+
+
+def test_touch_reports_whether_this_call_created_the_marker(tmp_path: Path) -> None:
+    assert overlay_fs.touch(tmp_path, Path("a/x.md.deleted")) is True
+    assert overlay_fs.touch(tmp_path, Path("a/x.md.deleted")) is False
+
+
+def test_a_failed_concurrent_delete_never_removes_a_tombstone_another_delete_created(env: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both DELETEs saw no tombstone; A creates it and succeeds while B's row removal fails.
+    B must not take back the tombstone A's success depends on."""
+    from openexecutive.api.routes import knowledge as routes
+
+    client, store, overlay = env["client"], env["store"], env["overlay"]
+    tomb = overlay / ".deleted" / "strategy" / "shipped_doc.md.deleted"
+    real_touch = routes.overlay_fs.touch
+
+    def touch_lost_the_race(root: Path, rel: Path) -> bool:
+        real_touch(root, rel)  # the other DELETE got there first...
+        return False           # ...so this call reports it did not create it
+
+    monkeypatch.setattr(routes.overlay_fs, "touch", touch_lost_the_race)
+    monkeypatch.setattr(store, "delete_documents", lambda *a, **k: None)  # this DELETE's row removal fails
+
+    assert client.delete("/knowledge/builtin/strategy/shipped_doc.md").status_code == 500
+    assert tomb.exists(), "only the creator of a tombstone may take it back"
+
+
+def test_a_whitespace_only_document_is_rejected(env: dict[str, Any]) -> None:
+    assert _post(env["client"], "blank.md", "  \n\t ").status_code == 422
+
+
+def test_a_failed_row_cleanup_on_create_removes_the_file_just_written(env: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, store, overlay = env["client"], env["store"], env["overlay"]
+    monkeypatch.setattr(store, "all_chunk_sources", lambda *a, **k: None)  # collection unreadable
+    res = _post(client, "new.md", "hello world " * 20)
+    assert res.status_code == 500
+    assert not (overlay / "strategy" / "new.md").exists(), "no half-created doc, so a retry is not a 409"
+
+
+def test_a_draining_handler_is_not_fed_more_body_after_the_limit_trips() -> None:
+    from openexecutive.api.body_limit import BodyLimitMiddleware
+
+    class Drains:
+        pulled = 0
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            for _ in range(50):
+                try:
+                    msg = await receive()
+                except Exception:  # noqa: BLE001
+                    continue
+                if msg["type"] == "http.request":
+                    Drains.pulled += len(msg["body"])
+
+    transport_reads = 0
+
+    async def receive() -> dict[str, Any]:
+        nonlocal transport_reads
+        transport_reads += 1
+        return {"type": "http.request", "body": b"x" * 1000, "more_body": True}
+
+    async def send(_m: Any) -> None: ...
+
+    scope = {"type": "http", "method": "POST", "path": "/knowledge/builtin", "headers": []}
+    asyncio.run(BodyLimitMiddleware(Drains(), {"/knowledge/builtin": 100})(scope, receive, send))
+    assert transport_reads == 1, "after the limit tripped, the handler is told the client is gone; nothing more is read"
+
+
+def test_a_stale_temp_file_is_swept_even_by_a_write_that_does_not_grow_the_overlay(env: dict[str, Any]) -> None:
+    import time
+
+    client, overlay = env["client"], env["overlay"]
+    _post(client, "one.md", "a" * 400)
+    ghost = overlay / "strategy" / ".gone.md.dddddddddddd.tmp"
+    ghost.write_bytes(b"x" * 50)
+    old = time.time() - overlay_fs.STALE_TEMP_SECONDS - 60
+    os.utime(ghost, (old, old))
+
+    assert client.put("/knowledge/builtin/strategy/one.md", json={"domain": "strategy", "filename": "one.md", "content": "b" * 400}).status_code == 200  # same size
+
     assert not ghost.exists()

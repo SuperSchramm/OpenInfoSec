@@ -8,8 +8,11 @@ for a body with no (or a lying) ``Content-Length``, so neither is ever fully rea
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -52,21 +55,26 @@ class BodyLimitMiddleware:
 
         received = 0
         rejected = False
+        stop_reading = False
         started = False
 
         async def limited_receive() -> Message:
-            nonlocal received, rejected
-            if rejected:
-                return {"type": "http.disconnect"}
+            nonlocal received, rejected, stop_reading
+            if stop_reading:
+                return {"type": "http.disconnect"}  # a handler that keeps draining sees the end, not more body
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit:
+                    stop_reading = True
+                    logger.warning("request body over the %d-byte limit on %s; aborted", limit, scope.get("path"))
                     # Answer here, not by letting the exception propagate: Starlette/FastAPI
                     # wrap an error raised while reading the body into their own 400, and
-                    # the app's later response is then swallowed by tracking_send.
-                    rejected = True
-                    await self._reject(send)
+                    # the app's later response is then swallowed by tracking_send. A handler
+                    # that already began responding can't take a 413 too.
+                    if not started:
+                        rejected = True
+                        await self._reject(send)
                     raise _BodyTooLarge
             return message
 

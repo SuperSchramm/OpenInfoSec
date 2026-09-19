@@ -562,7 +562,14 @@ knowledge:
         the overlay's markdown at `BUILTIN_OVERLAY_MAX_BYTES` (default 25 MB, 413
         when a write would grow it past that; replacing a doc credits its old
         size; embeddings in the vector store are not metered, and temp files a
-        killed writer left behind are swept after an hour). An
+        killed writer left behind, matched by their exact `.<doc>.md.<12 hex>.tmp`
+        name, are swept after an hour, on every write). Blank documents are
+        rejected (422).
+        A delete verifies the rows are really gone (an unreadable collection
+        counts as a failure, not as empty) and takes back a tombstone it created
+        (created atomically with `O_EXCL`, so only the creator may take it back)
+        if they are not, so the retry works instead of returning 404; a create
+        whose stale-row cleanup fails removes the file it just wrote. An
         overlay copy or tombstone shadows the shipped doc permanently: a later
         image that ships an updated version of that path is ignored until the
         overlay entry is deleted (a re-POST/PUT replaces it). The list endpoints return
