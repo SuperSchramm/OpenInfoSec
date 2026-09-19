@@ -19,6 +19,7 @@ from openexecutive.agents import overrides as agent_overrides
 from openexecutive.alerts import store as alert_store
 from openexecutive.departments import registry as dept_registry
 from openexecutive.departments import store as dept_store
+from openexecutive.departments.charters import DEFAULT_DEPARTMENTS
 from openexecutive.departments.completeness import check_org_completeness
 from openexecutive.departments.head_persona import ensure_head_persona_override
 from openexecutive.memory import episodic
@@ -27,7 +28,6 @@ from openexecutive.people import store as people_store
 from openexecutive.people.models import AuthorityScope
 from openexecutive.workflows import persistence as wf_persistence
 from openexecutive.workflows.resumer import sweep_stale_awaiting
-
 
 # ---------------------------------------------------------------------------
 # Shared isolation fixture
@@ -228,7 +228,7 @@ class TestOrgCompleteness:
         # By default, seeded departments have no head_person_id
         warnings = check_org_completeness()
         dept_warnings = [w for w in warnings if "has no head person" in w]
-        assert len(dept_warnings) == 8, f"All 8 default departments should warn: {dept_warnings}"
+        assert len(dept_warnings) == len(DEFAULT_DEPARTMENTS), f"All default departments should warn: {dept_warnings}"
         assert any("Finance" in w for w in dept_warnings)
 
     def test_no_head_warning_after_head_is_set(self) -> None:

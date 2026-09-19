@@ -14,6 +14,7 @@ from openexecutive.departments.cadence import (
     cancel_orphaned_cadences,
     enqueue_next,
 )
+from openexecutive.departments.charters import DEFAULT_DEPARTMENTS
 from openexecutive.memory import episodic
 
 
@@ -202,12 +203,12 @@ class TestBootstrapCadences:
         dept_registry.invalidate()
 
         count = bootstrap_cadences(db_path=db)
-        # 8 departments, all seeded with DEFAULT_CHECK_IN_CADENCE "daily@09:00"
-        assert count == 8
+        # every default department is seeded with DEFAULT_CHECK_IN_CADENCE "daily@09:00"
+        assert count == len(DEFAULT_DEPARTMENTS)
 
         actions = episodic.list_scheduled_actions(db_path=db)
         cadence_actions = [a for a in actions if a.kind == "dept_cadence"]
-        assert len(cadence_actions) == 8
+        assert len(cadence_actions) == len(DEFAULT_DEPARTMENTS)
 
     def test_idempotent_no_double_insert(self, tmp_path: Path) -> None:
         db = tmp_path / "test.db"
@@ -217,12 +218,12 @@ class TestBootstrapCadences:
         first = bootstrap_cadences(db_path=db)
         second = bootstrap_cadences(db_path=db)
 
-        assert first == 8
+        assert first == len(DEFAULT_DEPARTMENTS)
         assert second == 0  # nothing new inserted
 
         actions = episodic.list_scheduled_actions(db_path=db)
         cadence_actions = [a for a in actions if a.kind == "dept_cadence"]
-        assert len(cadence_actions) == 8
+        assert len(cadence_actions) == len(DEFAULT_DEPARTMENTS)
 
     def test_action_channel_and_ref(self, tmp_path: Path) -> None:
         db = tmp_path / "test.db"
@@ -249,7 +250,7 @@ class TestBootstrapCadences:
         dept_registry.invalidate()
 
         count = bootstrap_cadences(db_path=db)
-        assert count == 7  # 8 - 1 with empty cadence
+        assert count == len(DEFAULT_DEPARTMENTS) - 1  # minus finance, whose cadence was emptied
 
         actions = episodic.list_scheduled_actions(db_path=db)
         finance_cadences = [

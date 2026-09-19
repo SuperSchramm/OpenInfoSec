@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from openexecutive.api.routes import departments as departments_route
 from openexecutive.departments import registry, store
+from openexecutive.departments.charters import DEFAULT_DEPARTMENTS
 
 
 @pytest.fixture()
@@ -32,11 +33,11 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 # Read paths
 # --------------------------------------------------------------------------- #
 
-def test_list_returns_eight(client: TestClient) -> None:
+def test_list_returns_every_default_department(client: TestClient) -> None:
     resp = client.get("/departments")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 8
+    assert len(data) == len(DEFAULT_DEPARTMENTS)
     slugs = {item["config"]["slug"] for item in data}
     assert "finance" in slugs
     assert "board_comms" in slugs

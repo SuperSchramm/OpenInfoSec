@@ -15,8 +15,8 @@ from openexecutive.briefing import narrative as briefing_narrative
 from openexecutive.briefing import narrative_cache
 from openexecutive.departments import registry as dept_registry
 from openexecutive.departments import store as dept_store
-from openexecutive.memory import decision_ledger
-from openexecutive.memory import episodic
+from openexecutive.departments.charters import DEFAULT_DEPARTMENTS
+from openexecutive.memory import decision_ledger, episodic
 from openexecutive.people import insights_cache
 from openexecutive.people import registry as people_registry
 from openexecutive.people import store as people_store
@@ -84,7 +84,7 @@ def test_today_empty(client: TestClient) -> None:
     assert "departments" in data
     assert "people" in data
     assert "proposals" in data
-    assert len(data["departments"]) == 8
+    assert len(data["departments"]) == len(DEFAULT_DEPARTMENTS)
 
 
 def test_today_departments_have_fields(client: TestClient) -> None:

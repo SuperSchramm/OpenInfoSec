@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from openexecutive.departments import store
+from openexecutive.departments.charters import DEFAULT_DEPARTMENTS
 from openexecutive.departments.models import (
     AuthorityLevel,
     DepartmentCharter,
@@ -49,15 +50,12 @@ def test_list_departments_returns_empty_when_table_missing(tmp_path: Path) -> No
     assert store.list_departments(db_path=shared) == []
 
 
-def test_seed_inserts_eight_departments(db: Path) -> None:
+def test_seed_inserts_every_default_department(db: Path) -> None:
     inserted = store.seed_default_departments()
-    assert inserted == 8
+    assert inserted == len(DEFAULT_DEPARTMENTS)
     states = store.list_departments()
     slugs = {s.config.slug for s in states}
-    assert slugs == {
-        "strategy", "finance", "hr", "legal", "operations",
-        "marketing", "product", "board_comms",
-    }
+    assert slugs == {slug for slug, *_ in DEFAULT_DEPARTMENTS}
 
 
 def test_seed_is_idempotent_and_does_not_clobber(db: Path) -> None:
@@ -91,7 +89,7 @@ def test_seed_does_not_resurrect_deleted_default(db: Path) -> None:
     assert store.get_department("finance") is None
     slugs = {s.config.slug for s in store.list_departments()}
     assert "finance" not in slugs
-    assert len(slugs) == 7
+    assert len(slugs) == len(DEFAULT_DEPARTMENTS) - 1
 
 
 def test_seed_skips_preexisting_db_without_sentinel(db: Path) -> None:
@@ -320,7 +318,7 @@ def test_unknown_authority_level_falls_back_to_propose_only(db: Path) -> None:
 
     # And the list path keeps working — no exception escapes.
     all_states = store.list_departments()
-    assert len(all_states) == 8
+    assert len(all_states) == len(DEFAULT_DEPARTMENTS)
     finance = next(s for s in all_states if s.config.slug == "finance")
     assert finance.config.authority_level == AuthorityLevel.PROPOSE_ONLY
 
@@ -455,7 +453,7 @@ def test_delete_seeded_department(db: Path) -> None:
     store.delete_department("board_comms")
     slugs = {s.config.slug for s in store.list_departments()}
     assert "board_comms" not in slugs
-    assert len(slugs) == 7
+    assert len(slugs) == len(DEFAULT_DEPARTMENTS) - 1
 
 
 def test_delete_custom_department(db: Path) -> None:
