@@ -6,7 +6,7 @@ import re
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -652,15 +652,21 @@ def list_company_docs(docs_dir: Path) -> list[dict[str, Any]]:
 _CHUNKING_PENDING = "pending"
 
 
+class _Indexed(NamedTuple):
+    total: int
+    ids: set[str]
+    read: set[str]     # sources successfully read (blank files included)
+    indexed: set[str]  # sources that produced at least one chunk
+
+
 def _index_seed_files(
     store: ChromaDBStore,
     files: list[Path],
     collection: str,
     chunk_type: str,
-) -> tuple[int, set[str], set[str]]:
+) -> _Indexed:
     """Chunk and upsert each markdown file.
 
-    Returns (chunks written, their ids, sources of the files that were read).
     A file's rows are written with a provisional ``chunking`` marker and only
     stamped ``CHUNKING_VERSION`` after every batch landed (``add_documents``
     upserts in batches of 100), so a crash between batches can't leave a
@@ -669,6 +675,7 @@ def _index_seed_files(
     total = 0
     new_ids: set[str] = set()
     read_sources: set[str] = set()
+    indexed_sources: set[str] = set()
     for md_file in files:
         try:
             text = md_file.read_text(encoding="utf-8")
@@ -698,68 +705,114 @@ def _index_seed_files(
         store.stamp_chunking(collection, ids, CHUNKING_VERSION)
         total += len(chunks)
         new_ids.update(ids)
-    return total, new_ids, read_sources
+        indexed_sources.add(str(md_file))
+    return _Indexed(total, new_ids, read_sources, indexed_sources)
+
+
+def _manifest_keys(files: list[Path], root: Path) -> dict[Path, str]:
+    """Stable per-file keys: the path relative to the corpus root, so neither an
+    install that moved on disk nor two files that share a name collide."""
+    return {f: f.relative_to(root).as_posix() for f in files}
 
 
 def _seed_or_migrate(
     store: ChromaDBStore,
     files: list[Path],
+    root: Path,
     collection: str,
     chunk_type: str,
     force: bool,
 ) -> int:
-    """Seed an empty collection, or one-time re-chunk a populated one (issue #32).
+    """Seed a collection: fresh, incrementally, or one-time re-chunked (issue #32).
 
-    A collection seeded before #32 holds 400-512-word chunks, most longer than
-    the embedding window. Migration is upsert-then-delete, never delete-then-
-    upsert: the new chunks are written first (same ids, so they overwrite), and
-    only then are the leftover old rows of the files that were actually read
-    removed. Rows are stamped current per file only after all of its batches
-    are written, so a crash at any point leaves rows that still read as stale
-    and the next startup finishes the job -- it can't strand a half-empty or
-    truncated collection. Only rows of ``chunk_type`` whose ``source`` is one of
-    the files being reseeded are ever replaced: external OER rows (other
-    ``type``) share the built-in collection, and rows indexed through the API
-    from a file no longer on this disk have nothing to be re-chunked from --
-    both are left as they are. A consequence: if the install path changed since
-    the store was seeded, no row's ``source`` matches, so nothing migrates (the
-    log line below says how many rows were left).
+    * **Empty collection or ``force=True``:** every shipped file is indexed.
+    * **Populated collection:** only *targets* are indexed -- files whose rows
+      are not at the current ``CHUNKING_VERSION`` (a store seeded before #32
+      holds 400-512-word chunks, most longer than the embedding window), and
+      files a previous startup never saw. "Never saw" is a manifest of shipped
+      file keys (path relative to the corpus root) kept in
+      ``seed_manifest_<collection>.json`` next to the store, NOT "has no rows":
+      a doc an admin deleted through the API must not come back at the next
+      restart just because the image still ships the file. The first startup
+      after manifests appeared bootstraps it from the rows already present (a
+      shipped doc deleted before that point is re-added once). The manifest only
+      grows; a missing or short corpus (bad mount) never prunes it.
 
-    ``force=True`` reseeds every file and, like the automatic path, then drops
-    the leftover rows of the files it re-read (a file that shrank).
+    Re-chunking is upsert-then-delete, never delete-then-upsert: new chunks are
+    written first (same ids, so they overwrite), and only then are the leftover
+    old rows of the files actually read removed. Rows are stamped current per
+    file only after all of its batches are written, so a crash at any point
+    leaves rows that still read as stale and the next startup finishes the job
+    for just those files. Only rows of ``chunk_type`` whose ``source`` is a file
+    being reseeded are replaced: external OER rows (other ``type``) share the
+    built-in collection, and rows indexed through the API from a file no longer
+    on this disk have nothing to be re-chunked from -- both are left as they
+    are. (If the install path changed since seeding, no row's ``source``
+    matches and nothing re-chunks; the log line says how many rows were left.)
 
-    The whole pass is synchronous embedding inside the app lifespan (~15s for
-    the shipped corpus on a laptop, longer on a small VM); the API isn't
-    serving until it returns. It runs once per profile change and resumes
-    after an interruption.
+    On a populated collection a failure is logged and startup carries on (the
+    same files are retried next boot); on a fresh seed or ``force`` it
+    propagates, as it always did. ``force=True`` also drops the leftover rows of
+    the files it re-read (a file that shrank).
+
+    The pass is synchronous embedding inside the app lifespan (~15s for the
+    whole shipped corpus on a laptop, longer on a small VM); the API isn't
+    serving until it returns.
     """
+    keys = _manifest_keys(files, root)
+    manifest = store.read_seed_manifest(collection)
     stale_rows: dict[str, str | None] = {}
+    targets = files
+    populated = not force and store.get_collection_count(collection) > 0
     if force:
         # "" matches no marker, so this lists every row of the type: after the
         # upsert, any of a re-read file's rows that weren't rewritten (the file
         # shrank) are removed, same as the automatic path.
         stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, "")
-    elif store.get_collection_count(collection) > 0:
-        sources = {str(f) for f in files}
+    elif populated:
         stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, CHUNKING_VERSION)
-        replaceable = sum(1 for source in stale_rows.values() if source in sources)
+        by_source = {str(f): f for f in files}
+        stale_files = {by_source[s] for s in stale_rows.values() if s in by_source}
+        if manifest is None:
+            present = store.indexed_files(collection, {"type": chunk_type})
+            if present is not None:  # None = unreadable: learn nothing, add nothing
+                manifest = {key for f, key in keys.items() if (infer_domain_from_path(f), f.name) in present}
+        unseen = {f for f in files if manifest is not None and keys[f] not in manifest}
+        targets = [f for f in files if f in stale_files or f in unseen]
         if stale_rows:
             logger.info(
                 "%s: %d %s rows are not at %s; %d have a source file on disk and will be re-chunked "
                 "(one-time, issue #32), %d are left as-is",
-                collection, len(stale_rows), chunk_type, CHUNKING_VERSION, replaceable, len(stale_rows) - replaceable,
+                collection, len(stale_rows), chunk_type, CHUNKING_VERSION,
+                sum(1 for s in stale_rows.values() if s in by_source), sum(1 for s in stale_rows.values() if s not in by_source),
             )
-        if not replaceable:
+        if not targets:
+            if manifest is not None and store.read_seed_manifest(collection) is None:
+                store.write_seed_manifest(collection, manifest)
             return 0
 
-    total, new_ids, read_sources = _index_seed_files(store, files, collection, chunk_type)
+    try:
+        result = _index_seed_files(store, targets, collection, chunk_type)
+    except Exception:
+        if not populated:
+            raise
+        logger.exception("%s: indexing %d %s file(s) failed; startup continues, retrying next boot",
+                         collection, len(targets), chunk_type)
+        return 0
+
     leftovers = [
         row_id for row_id, source in stale_rows.items()
-        if source in read_sources and row_id not in new_ids
+        if source in result.read and row_id not in result.ids
     ]
     if leftovers:
         store.delete_ids(collection, leftovers)
-    return total
+    if not populated or manifest is not None:
+        known = (manifest or set()) | {keys[f] for f in targets if str(f) in result.indexed}
+        if known and known != manifest:
+            store.write_seed_manifest(collection, known)
+    if populated and result.total:
+        logger.info("%s: indexed %d chunks from %d %s file(s)", collection, result.total, len(targets), chunk_type)
+    return result.total
 
 
 async def seed_builtin_knowledge(
@@ -778,7 +831,7 @@ async def seed_builtin_knowledge(
         f for f in BUILTIN_KNOWLEDGE_PATH.rglob("*.md")
         if not any(p in f.relative_to(BUILTIN_KNOWLEDGE_PATH).parts for p in ("skills", "failures"))
     ]
-    return _seed_or_migrate(store, files, ChromaDBStore.BUILTIN_COLLECTION, "builtin", force)
+    return _seed_or_migrate(store, files, BUILTIN_KNOWLEDGE_PATH, ChromaDBStore.BUILTIN_COLLECTION, "builtin", force)
 
 
 async def seed_failures(
@@ -787,8 +840,8 @@ async def seed_failures(
 ) -> int:
     """Index all failure case studies from builtin/failures/<domain>/*.md.
 
-    Idempotent: skipped if the failures collection is already non-empty,
-    unless force=True -- except that a collection chunked before issue #32
+    Idempotent: a populated failures collection is left alone (apart from
+    indexing newly shipped files) unless force=True -- and except that a collection chunked before issue #32
     (400-word chunks, most longer than the embedding window) is re-chunked once
     to the current profile (see ``_seed_or_migrate``). Uses the same fine
     chunking as everything else; ``ingest_builtin_file`` (the failure CRUD
@@ -804,4 +857,4 @@ async def seed_failures(
         logger.warning("failures knowledge path not found, skipping: %s", FAILURES_KNOWLEDGE_PATH)
         return 0
     files = list(FAILURES_KNOWLEDGE_PATH.rglob("*.md"))
-    return _seed_or_migrate(store, files, ChromaDBStore.FAILURES_COLLECTION, "failure_case", force)
+    return _seed_or_migrate(store, files, FAILURES_KNOWLEDGE_PATH, ChromaDBStore.FAILURES_COLLECTION, "failure_case", force)

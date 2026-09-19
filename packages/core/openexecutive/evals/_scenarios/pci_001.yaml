@@ -1,0 +1,22 @@
+id: pci_001
+domain: security
+description: "Which SAQ applies to an e-commerce site that embeds the processor's hosted payment form in an iframe"
+company_context:
+  stage: "Growth"
+  industry: "Healthcare Technology - Patient Billing Portal"
+  headcount: 220
+query: "Our patient billing portal embeds our payment processor's hosted card form in an iframe on our own page, and card numbers never touch our servers. Which PCI SAQ do we fill out, and is there anything new in the current version of the standard that we need to prove?"
+expected_topics:
+  - saq_a_for_embedded_hosted_form
+  - not_saq_a_ep_because_of_iframe_alone
+  - v4_0_1_script_attack_eligibility_criterion
+  - processor_written_confirmation_or_6_4_3_11_6_1
+  - confirm_with_acquirer_or_qsa
+required_routing:
+  - grc
+quality_criteria:
+  actionable: true
+  cites_pci_dss_v4_0_1_not_an_older_version: true
+  does_not_claim_saq_a_ep_for_a_processor_hosted_iframe: true
+  states_what_evidence_to_request_from_the_processor: true
+  recommends_confirming_with_acquirer_or_qsa: true

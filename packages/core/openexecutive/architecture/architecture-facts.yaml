@@ -538,7 +538,13 @@ knowledge:
         tokens), so ~2/3 of each was unsearchable; measured on the real corpus
         at the unchanged 0.55 gate, late-in-document heading questions went
         22/60 -> 33/60 recall@3 and off-topic queries still passed 0/12.
-        Seeding only runs on an empty collection, so every chunk carries a
+        Seeding runs on an empty collection, and on a populated one it also
+        indexes shipped files a previous startup never saw (a manifest of
+        relative paths in `seed_manifest_<collection>.json` next to the store,
+        bootstrapped from existing rows; so a doc an admin deleted stays
+        deleted and a moved install doesn't duplicate; never deletes), which
+        is how a doc added in a later release (e.g. the PCI DSS v4.0.1 pair)
+        reaches a store that outlives the image. Every chunk carries a
         `chunking` metadata marker (`loader.CHUNKING_VERSION`, derived from the
         sizes) and `seed_builtin_knowledge` re-chunks a store seeded with a
         different profile ONCE at startup (~15s, 218 -> ~890 chunks). It is

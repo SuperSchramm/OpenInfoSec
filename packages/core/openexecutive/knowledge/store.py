@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -63,6 +65,7 @@ class ChromaDBStore(KnowledgeStore):
         import chromadb
         from chromadb.config import Settings
 
+        self.persist_directory = Path(persist_directory)
         self._client = chromadb.PersistentClient(
             path=str(persist_directory),
             settings=Settings(anonymized_telemetry=False),
@@ -169,6 +172,48 @@ class ChromaDBStore(KnowledgeStore):
                 source = meta.get("source")
                 stale[row_id] = source if isinstance(source, str) else None
         return stale
+
+    def indexed_files(self, collection: str, where: dict[str, Any]) -> set[tuple[str, str]] | None:
+        """``(domain, filename)`` of every document with rows matching ``where``.
+
+        Keyed by name rather than ``source`` path so an install that moved on
+        disk isn't mistaken for "all files are new". None when the collection
+        can't be read: callers must treat that as "unknown", never as "empty"."""
+        try:
+            rows = self._client.get_collection(collection).get(where=where, include=["metadatas"])
+        except Exception:
+            return None
+        return {
+            (str(meta.get("domain")), str(meta.get("filename")))
+            for meta in (rows.get("metadatas") or [])
+            if meta
+        }
+
+    def _seed_manifest_path(self, collection: str) -> Path:
+        return self.persist_directory / f"seed_manifest_{collection}.json"
+
+    def read_seed_manifest(self, collection: str) -> set[str] | None:
+        """Keys of the shipped files a previous startup already handled for
+        ``collection`` (see loader._index_new_files). None when there is no
+        manifest yet or it can't be read -- callers bootstrap from the rows."""
+        try:
+            data = json.loads(self._seed_manifest_path(collection).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, list) or not all(isinstance(k, str) for k in data):
+            return None
+        return set(data)
+
+    def write_seed_manifest(self, collection: str, keys: set[str]) -> None:
+        """Atomically record ``keys``. Best effort: a failure is logged and the
+        next startup just bootstraps the manifest from the rows again."""
+        path = self._seed_manifest_path(collection)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(sorted(keys)), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception("write_seed_manifest: could not write %s", path)
 
     def stamp_chunking(self, collection: str, ids: list[str], version: str) -> None:
         """Set the ``chunking`` marker (issue #32) on existing rows, without

@@ -156,6 +156,7 @@ def corpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(loader_mod, "FAILURES_KNOWLEDGE_PATH", failures)
     return {
         "alpha": builtin / "strategy" / "alpha.md",
+        "beta": builtin / "finance" / "beta.md",
         "kodak": failures / "strategy" / "kodak.md",
         "store": ChromaDBStore(persist_directory=tmp_path / "chroma"),
         "alpha_n": len(chunk_text(_words(420, "alpha"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP)),
@@ -234,15 +235,16 @@ def test_a_store_marked_with_a_different_profile_is_migrated(corpus: dict[str, A
     assert _ids(store, ChromaDBStore.BUILTIN_COLLECTION) and _stale(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin") == {}
 
 
-def test_a_collection_holding_only_external_rows_is_not_treated_as_stale(corpus: dict[str, Any]) -> None:
-    # Pre-existing behavior (seeding is skipped whenever the collection is
-    # non-empty) is deliberately unchanged: "no built-in rows" is not "stale".
+def test_a_collection_holding_only_external_rows_still_gets_the_shipped_docs(corpus: dict[str, Any]) -> None:
+    """External OER rows share this collection. "No built-in rows" is not
+    "stale" (nothing is deleted), but it does mean the shipped docs are new."""
     store = corpus["store"]
     store.add_documents(
         texts=["external"], metadatas=[{"domain": "strategy", "type": "external", "source_id": "s", "chunk_index": 0}],
         ids=["ext-only"], collection=ChromaDBStore.BUILTIN_COLLECTION,
     )
-    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == corpus["alpha_n"] + corpus["beta_n"]
+    assert "ext-only" in _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
 
 
 def test_force_reseed_still_works(corpus: dict[str, Any]) -> None:
@@ -284,12 +286,12 @@ def test_a_crash_mid_migration_loses_nothing_and_the_next_start_finishes(
         real_add(*a, **kw)
 
     monkeypatch.setattr(store, "add_documents", flaky)
-    with pytest.raises(RuntimeError):
-        asyncio.run(seed_builtin_knowledge(store=store))
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0  # logged, startup carries on
 
     assert set(old) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION), "old rows must survive an interrupted migration"
     monkeypatch.setattr(store, "add_documents", real_add)
-    assert asyncio.run(seed_builtin_knowledge(store=store)) == corpus["alpha_n"] + corpus["beta_n"]
+    asyncio.run(seed_builtin_knowledge(store=store))  # redoes only what the crash left unfinished
+    assert store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION) == corpus["alpha_n"] + corpus["beta_n"]
     assert not set(old) & _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
     assert _stale(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin") == {}
     assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
@@ -309,11 +311,12 @@ def test_rows_whose_source_file_is_gone_are_kept_and_do_not_retrigger_the_migrat
     assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
 
 
-def test_only_orphans_present_means_nothing_to_migrate(corpus: dict[str, Any], tmp_path: Path) -> None:
+def test_orphans_alone_are_never_migrated_or_deleted(corpus: dict[str, Any], tmp_path: Path) -> None:
     store = corpus["store"]
     orphan = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", tmp_path / "gone.md")
-    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    asyncio.run(seed_builtin_knowledge(store=store))  # the shipped docs are new and get added
     assert set(orphan) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
 
 
 def test_a_missing_failures_directory_never_empties_the_collection(corpus: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -390,8 +393,7 @@ def test_a_crash_between_batches_of_one_big_file_is_still_stale(
         raise RuntimeError("killed between batches")
 
     monkeypatch.setattr(store, "add_documents", first_batch_only)
-    with pytest.raises(RuntimeError):
-        asyncio.run(seed_builtin_knowledge(store=store))
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0  # logged, startup carries on
     assert _stale(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin"), "a truncated file must still read as stale"
 
     monkeypatch.setattr(store, "add_documents", real_add)
@@ -458,3 +460,235 @@ def test_force_reseed_leaves_external_and_orphan_rows(corpus: dict[str, Any], tm
     )
     asyncio.run(seed_builtin_knowledge(store=store, force=True))
     assert set(orphan) | {"ext-force"} <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+# ---- new shipped docs reach an already-seeded store (PCI DSS docs, #33-style follow-up)
+
+def test_a_doc_added_in_a_later_release_is_indexed_into_an_existing_store(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    before = _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+    new = corpus["alpha"].parent / "pci_new.md"
+    new.write_text(_words(300, "pci"), encoding="utf-8")
+
+    added = asyncio.run(seed_builtin_knowledge(store=store))
+
+    assert added == len(chunk_text(_words(300, "pci"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP)) > 2
+    assert before < _ids(store, ChromaDBStore.BUILTIN_COLLECTION), "existing rows untouched, new ones added"
+    assert _stale(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin") == {}
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0, "and only once"
+
+
+def test_a_doc_the_store_already_has_is_not_duplicated_when_the_install_path_moves(
+    corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    count = store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION)
+    moved = tmp_path / "moved"
+    (tmp_path / "builtin").rename(moved)
+    monkeypatch.setattr(loader_mod, "BUILTIN_KNOWLEDGE_PATH", moved)
+    monkeypatch.setattr(loader_mod, "FAILURES_KNOWLEDGE_PATH", moved / "failures")
+
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION) == count
+
+
+def test_an_unreadable_store_adds_nothing(corpus: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    (store.persist_directory / f"seed_manifest_{ChromaDBStore.BUILTIN_COLLECTION}.json").unlink()  # force a bootstrap
+    (corpus["alpha"].parent / "extra.md").write_text(_words(200, "x"), encoding="utf-8")
+    monkeypatch.setattr(store, "indexed_files", lambda *a, **k: None)
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+
+
+def test_new_failure_case_files_are_picked_up_too(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_failures(store=store))
+    (corpus["kodak"].parent / "another.md").write_text(_words(240, "fail"), encoding="utf-8")
+    assert asyncio.run(seed_failures(store=store)) == len(chunk_text(_words(240, "fail"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
+
+
+def test_indexed_files_is_none_for_a_missing_collection(tmp_path: Path) -> None:
+    store = ChromaDBStore(persist_directory=tmp_path / "chroma")
+    assert store.indexed_files("no_such_collection", {"type": "builtin"}) is None
+
+
+# ---- manifest: what a previous startup saw, not "has rows" (review of the new-file pickup)
+
+def _rows_of(store: ChromaDBStore, source: Path) -> list[str]:
+    got = store._get_or_create_collection(ChromaDBStore.BUILTIN_COLLECTION).get(where={"source": str(source)}, include=[])
+    return got["ids"]
+
+
+def test_a_shipped_doc_an_admin_deleted_is_not_resurrected_by_a_restart(corpus: dict[str, Any]) -> None:
+    """DELETE /knowledge/builtin/... removes the rows (and the file, which the
+    image brings back on the next deploy). The manifest remembers the file was
+    already handled, so its presence on disk must not re-add it."""
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    store.delete_documents(ChromaDBStore.BUILTIN_COLLECTION, where={"source": str(corpus["beta"])})
+    assert not _rows_of(store, corpus["beta"])
+
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert not _rows_of(store, corpus["beta"])
+
+
+def test_same_filename_in_a_subdirectory_is_a_different_file(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    sub = corpus["alpha"].parent / "sub"
+    sub.mkdir()
+    (sub / "alpha.md").write_text(_words(200, "sub"), encoding="utf-8")
+
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == len(chunk_text(_words(200, "sub"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
+    assert _rows_of(store, sub / "alpha.md")
+
+
+def test_first_start_after_upgrade_bootstraps_the_manifest_from_existing_rows(corpus: dict[str, Any]) -> None:
+    """An install seeded before manifests existed: docs with rows are recorded as
+    handled (no duplicates), a doc without rows is new, and the manifest is
+    written so later deletions stick."""
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    manifest = store.persist_directory / f"seed_manifest_{ChromaDBStore.BUILTIN_COLLECTION}.json"
+    manifest.unlink()
+    count = store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION)
+    (corpus["alpha"].parent / "pci_new.md").write_text(_words(200, "pci"), encoding="utf-8")
+
+    added = asyncio.run(seed_builtin_knowledge(store=store))
+
+    assert added == len(chunk_text(_words(200, "pci"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
+    assert store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION) == count + added
+    assert store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION) == {"strategy/alpha.md", "finance/beta.md", "strategy/pci_new.md"}
+
+
+def test_a_failure_while_indexing_a_new_doc_does_not_break_startup_and_is_retried(
+    corpus: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    (corpus["alpha"].parent / "later.md").write_text(_words(200, "later"), encoding="utf-8")
+    real_add = store.add_documents
+
+    def boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("embedding model unavailable")
+
+    monkeypatch.setattr(store, "add_documents", boom)
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0  # logged, not raised
+
+    monkeypatch.setattr(store, "add_documents", real_add)
+    assert asyncio.run(seed_builtin_knowledge(store=store)) > 0
+    assert "strategy/later.md" in store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_an_unreadable_new_doc_is_retried_not_recorded_as_handled(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    bad = corpus["alpha"].parent / "bad.md"
+    bad.write_bytes(b"\xff\xfe\xfa words")
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert "strategy/bad.md" not in store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION)
+
+    bad.write_text(_words(200, "fixed"), encoding="utf-8")
+    assert asyncio.run(seed_builtin_knowledge(store=store)) > 0
+
+
+def test_a_corrupt_manifest_is_treated_as_missing(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    (store.persist_directory / f"seed_manifest_{ChromaDBStore.BUILTIN_COLLECTION}.json").write_text("{not json", encoding="utf-8")
+    assert store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION) is None
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0  # bootstraps from rows, adds nothing
+    assert store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION) == {"strategy/alpha.md", "finance/beta.md"}
+
+
+# ---- round 2 review: a bad mount or a failed index must not undo an admin's delete
+
+def test_a_missing_corpus_root_does_not_wipe_the_manifest(corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    store.delete_documents(ChromaDBStore.BUILTIN_COLLECTION, where={"source": str(corpus["beta"])})  # admin deletes beta
+    real_root = loader_mod.BUILTIN_KNOWLEDGE_PATH
+
+    monkeypatch.setattr(loader_mod, "BUILTIN_KNOWLEDGE_PATH", tmp_path / "not-mounted")  # bad mount: no files at all
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION) == {"strategy/alpha.md", "finance/beta.md"}
+
+    monkeypatch.setattr(loader_mod, "BUILTIN_KNOWLEDGE_PATH", real_root)  # mount comes back
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert not _rows_of(store, corpus["beta"])
+
+
+def test_a_half_written_new_doc_is_retried_alone_and_does_not_resurrect_deleted_docs(
+    corpus: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new doc fails between writing its rows and stamping them. The leftover
+    pending rows make the next start see "stale rows with a source on disk";
+    that must re-do just that file, not every shipped file."""
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    store.delete_documents(ChromaDBStore.BUILTIN_COLLECTION, where={"source": str(corpus["beta"])})
+    new = corpus["alpha"].parent / "big.md"
+    new.write_text(_words(300, "big"), encoding="utf-8")
+    real_stamp = store.stamp_chunking
+
+    def boom(*a: Any, **k: Any) -> None:
+        raise RuntimeError("killed before stamping")
+
+    monkeypatch.setattr(store, "stamp_chunking", boom)
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert _rows_of(store, new), "pending rows were written"
+
+    monkeypatch.setattr(store, "stamp_chunking", real_stamp)
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == len(chunk_text(_words(300, "big"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
+    assert not _rows_of(store, corpus["beta"]), "the deleted doc must stay deleted"
+    assert _stale(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin") == {}
+
+
+def test_re_chunking_a_legacy_store_skips_a_doc_the_manifest_says_was_deleted(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", corpus["alpha"])
+    store.write_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION, {"strategy/alpha.md", "finance/beta.md"})  # beta was handled, then deleted
+
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == corpus["alpha_n"]
+    assert not _rows_of(store, corpus["beta"])
+
+
+def test_a_blank_shipped_file_is_indexed_once_it_gets_content(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    blank = corpus["alpha"].parent / "later.md"
+    blank.write_text("   \n", encoding="utf-8")
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert "strategy/later.md" not in store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION)
+
+    blank.write_text(_words(200, "later"), encoding="utf-8")
+    assert asyncio.run(seed_builtin_knowledge(store=store)) > 0
+
+
+def test_a_partial_corpus_view_does_not_prune_the_manifest(corpus: dict[str, Any], tmp_path: Path) -> None:
+    """Half the corpus is missing (a subdirectory not mounted) on a startup that
+    also has a new doc to index, so the manifest IS rewritten. It must keep the
+    keys it can't currently see, or the deleted doc returns once they reappear."""
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    store.delete_documents(ChromaDBStore.BUILTIN_COLLECTION, where={"source": str(corpus["beta"])})  # admin deletes beta
+    finance = corpus["beta"].parent
+    hidden = tmp_path / "finance-unmounted"
+    finance.rename(hidden)
+    (corpus["alpha"].parent / "new.md").write_text(_words(200, "new"), encoding="utf-8")
+    assert asyncio.run(seed_builtin_knowledge(store=store)) > 0  # rewrites the manifest with a partial view
+
+    hidden.rename(finance)  # the subdirectory comes back
+    assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
+    assert not _rows_of(store, corpus["beta"])
+
+
+def test_a_forced_reseed_with_no_files_leaves_the_manifest_alone(corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    monkeypatch.setattr(loader_mod, "BUILTIN_KNOWLEDGE_PATH", tmp_path / "not-mounted")
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+    assert store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION) == {"strategy/alpha.md", "finance/beta.md"}

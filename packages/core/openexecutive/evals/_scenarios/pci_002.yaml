@@ -1,0 +1,23 @@
+id: pci_002
+domain: security
+description: "Team plans an audit against an older PCI DSS version and asks what is now mandatory"
+company_context:
+  stage: "Growth"
+  industry: "Healthcare Technology - Patient Billing Portal"
+  headcount: 220
+query: "Our consultant built the PCI audit checklist from PCI DSS 4.0 and some of it from 3.2.1. We're preparing for the assessment now. Is that the right basis, and which of the newer requirements are people usually caught out by?"
+expected_topics:
+  - v4_0_1_is_the_only_active_version
+  - v3_2_1_and_v4_0_retired
+  - future_dated_requirements_now_mandatory
+  - payment_page_scripts_6_4_3_11_6_1
+  - mfa_into_the_whole_cde_8_4_2
+  - scope_confirmation_12_5_2
+required_routing:
+  - grc
+quality_criteria:
+  actionable: true
+  says_to_rebase_the_checklist_on_v4_0_1: true
+  names_specific_requirement_numbers: true
+  does_not_present_future_dated_requirements_as_optional: true
+  recommends_qsa_confirmation_of_specifics: true
