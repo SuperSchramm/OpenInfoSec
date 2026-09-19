@@ -530,7 +530,35 @@ routing:
 knowledge:
   collections:
     - name: BUILTIN
-      what: Curated MBA-style domain knowledge shipped with the repo.
+      what: |
+        Curated MBA-style domain knowledge shipped with the repo, chunked with
+        the fine profile (120 words / 20 overlap, `loader.FINE_CHUNK_*`; issue
+        #32) so each chunk fits the embedding model's 256-token window. Before
+        that, 199 of 218 chunks were longer than the window (median ~750
+        tokens), so ~2/3 of each was unsearchable; measured on the real corpus
+        at the unchanged 0.55 gate, late-in-document heading questions went
+        22/60 -> 33/60 recall@3 and off-topic queries still passed 0/12.
+        Seeding only runs on an empty collection, so every chunk carries a
+        `chunking` metadata marker (`loader.CHUNKING_VERSION`, derived from the
+        sizes) and `seed_builtin_knowledge` re-chunks a store seeded with a
+        different profile ONCE at startup (~15s, 218 -> ~890 chunks). It is
+        upsert-then-delete (`loader._seed_or_migrate`): new chunks overwrite
+        the same ids first and only then are leftover old rows removed, so a
+        crash mid-migration loses nothing and the next startup finishes it.
+        Only `type=builtin` rows whose `source` file is still on disk are
+        replaced; external OER rows (same collection) and rows from docs
+        added via the API whose file is gone with the image are left as they
+        are (if the install path changed since seeding no `source` matches and
+        nothing migrates; the startup log reports the counts). Rows are
+        stamped current per file only after all its batches are written, and an
+        unreadable file keeps its old rows. The pass is synchronous embedding
+        inside the app lifespan. `force=True` also drops the leftover rows of
+        files it re-read. Failure cases
+        (`failure_cases`, previously 400 words) migrate identically via
+        `seed_failures`; both CRUD routes and the seeders use the same
+        `default_chunking`, so a PUT matches seed time. Notion pages already
+        indexed keep their old chunks until they change; `openexecutive
+        purge-notion` + `sync-notion` re-chunks them immediately.
     - name: COMPANY
       what: |
         Customer-supplied documents ingested via the /documents endpoint. The
@@ -562,7 +590,7 @@ knowledge:
         rebuild) re-tags from the path, i.e. "general" -- drift is always
         toward more visibility, never toward hiding a doc.
         Chunking (issue #31): `ingest_file` splits company docs into 120-word
-        chunks (20 overlap; `loader.COMPANY_DOC_CHUNK_WORDS`), NOT the 512
+        chunks (20 overlap; `loader.FINE_CHUNK_WORDS`), NOT the 512
         used elsewhere. Chroma's default embedding model (all-MiniLM-L6-v2)
         embeds only the first 256 tokens of its input -- verified: texts that
         differ only after token 256 embed identically -- and technical prose
@@ -577,16 +605,19 @@ knowledge:
         loop-blocking embedding work inside `ingest_file` (~14ms/chunk, ~4.3x
         more chunks), scales with the smaller size, and that path accepts
         files from any rostered sender. The same reasoning bounds huge admin
-        uploads: a doc over `COMPANY_DOC_FINE_CHUNK_MAX_WORDS` (60,000 words,
+        uploads: a doc over `FINE_CHUNK_MAX_WORDS` (60,000 words,
         ~120 pages) falls back to 512/50 when the caller didn't pick a size, so
         the worst-case synchronous embedding time for a single document is never
         worse than before (an extracted 50MB text file is ~8M words: ~19 min at
         120-word chunks vs ~4 min). The bound is per document, not per batch: a
         loop over many sub-limit docs (fixture load, client-slot rebuild) still
         costs ~4.6x what it did. Docs ingested before this change keep their old chunks until
-        re-ingested (re-upload, or reload the fixture). BUILTIN, Notion and
-        research ingestion still use larger chunks (same 256-token truncation
-        applies to them; not addressed here). Known trade-offs, measured not
+        re-ingested (re-upload, or reload the fixture). The same fine profile now
+        applies to the built-in library, failure cases, Notion pages and research
+        artifacts (issue #32; see BUILTIN below for the one-time migration).
+        Still 512 words: attachments (deliberately) and external OER sources
+        (`external_sources.py` -- large corpora, so ~4.6x more chunks and rows
+        is a bigger decision). Known trade-offs, measured not
         fixed: each hit carries less text and the distance gate (not
         `n_results`) limits how many chunks return, so a broad "walk me
         through the whole plan" question reaches fewer sections of a plan than

@@ -32,40 +32,63 @@ DOMAIN_MAP: dict[str, str] = {
 }
 
 
-# Chunk size for company docs (issue #31). Chroma's default embedding model
+# The "fine" chunk profile (issues #31, #32). Chroma's default embedding model
 # (all-MiniLM-L6-v2) embeds only the FIRST 256 TOKENS of its input -- verified:
 # two texts that differ only after token 256 embed identically (cosine 1.0).
-# Technical prose averages ~1.6 tokens/word, so the old 512-word chunks
-# (~680 tokens) were represented by roughly their first third and the rest was
-# invisible to vector search. 120 words peaked at 222 tokens on real policy
-# docs (fits with margin); 150 already overflowed. Measured on the five
-# clearpath_health policy docs at the 0.55 distance gate: recall@3 6/12 ->
-# 9/12 with no false positives, and 2/8 -> 6/8 specific facts actually
-# reaching the specialist.
-COMPANY_DOC_CHUNK_WORDS = 120
-COMPANY_DOC_CHUNK_OVERLAP = 20
+# Technical prose averages ~1.5-1.6 tokens/word, so the old 512-word chunks
+# (median ~700 tokens) were represented by roughly their first third and the
+# rest was invisible to vector search. 120 words peaks at 222 tokens on real
+# policy docs and 245 on the built-in library (fits with margin); 150 already
+# overflows. Measured at the unchanged 0.55 distance gate:
+#   company docs (5 policy docs):  recall@3 6/12 -> 9/12, facts reaching the
+#     specialist 2/8 -> 6/8, no false positives;
+#   built-in library (76 docs, heading questions): late-in-document recall
+#     22/60 -> 33/60, early 38/60 -> 40/60, off-topic queries still 0/12.
+FINE_CHUNK_WORDS = 120
+FINE_CHUNK_OVERLAP = 20
 
-# Above this many words a doc falls back to the previous 512/50 chunking (only
+# Above this many words a text falls back to the legacy 512/50 chunking (only
 # when the caller didn't ask for a size explicitly). Embedding runs
-# synchronously on the event loop inside ingest_file at ~14ms/chunk, and the
-# smaller size means ~4.6x more chunks: fine for a normal document (a 100-page
-# policy is ~6.8s), but an extracted 50MB text file (~8M words) would freeze the
-# whole process for ~19 minutes instead of ~4. Past this point the doc is not
-# a policy anyone retrieves passages from by fine-grained match anyway, and the
-# fallback keeps a single document's worst case exactly what it was before this
-# change -- no content is dropped and no new failure mode is introduced. 60,000
-# words is ~120 pages, i.e. <=~8s of fine chunking. The bound is PER DOCUMENT:
-# a loop over many sub-limit docs (a fixture load, a client-slot rebuild) still
-# costs ~4.6x what it did, N x ~8s instead of N x ~1.8s for N near-limit docs.
-COMPANY_DOC_FINE_CHUNK_MAX_WORDS = 60_000
+# synchronously inside ingest_file at ~14ms/chunk, and the fine size means ~4.6x
+# more chunks: fine for a normal document (a 100-page policy is ~6.8s), but an
+# extracted 50MB text file (~8M words) would freeze the whole process for ~19
+# minutes instead of ~4. Past this point the doc is not a policy anyone
+# retrieves passages from by fine-grained match anyway, and the fallback keeps a
+# single document's worst case exactly what it was before -- no content is
+# dropped and no new failure mode is introduced. 60,000 words is ~120 pages,
+# i.e. <=~8s of fine chunking. The bound is PER DOCUMENT: a loop over many
+# sub-limit docs (a fixture load, a client-slot rebuild) still costs ~4.6x what
+# it did, N x ~8s instead of N x ~1.8s for N near-limit docs.
+FINE_CHUNK_MAX_WORDS = 60_000
 
-# Attachments keep the previous chunking on purpose. Chunk count (and so the
+# The pre-#31 chunking, kept where a larger chunk is the right trade.
+LEGACY_CHUNK_WORDS = 512
+LEGACY_CHUNK_OVERLAP = 50
+
+# Attachments keep the legacy chunking on purpose. Chunk count (and so the
 # synchronous, event-loop-blocking embedding work inside ingest_file) scales
 # ~4.3x with the smaller size -- fine for an admin-curated /documents upload
 # behind the shared secret, but attachments are accepted from any rostered
 # sender, where that multiplier is the wrong trade.
-ATTACHMENT_CHUNK_WORDS = 512
-ATTACHMENT_CHUNK_OVERLAP = 50
+ATTACHMENT_CHUNK_WORDS = LEGACY_CHUNK_WORDS
+ATTACHMENT_CHUNK_OVERLAP = LEGACY_CHUNK_OVERLAP
+
+# Written into the metadata of built-in and failure-case chunks so startup can
+# tell a collection seeded with an older profile and re-chunk it (issue #32).
+# Derived from the sizes, so changing them re-seeds automatically.
+CHUNKING_VERSION = f"fine-{FINE_CHUNK_WORDS}-{FINE_CHUNK_OVERLAP}"
+
+
+def default_chunking(text: str) -> tuple[int, int]:
+    """``(chunk_words, overlap)`` for a text whose caller didn't pick a size:
+    the fine profile, or the legacy one past ``FINE_CHUNK_MAX_WORDS``."""
+    # A text of W words has at least 2W-1 characters, so anything up to
+    # 2*MAX characters can't exceed MAX words: skip the full split (which is
+    # ~1s and hundreds of MB of transient list on a 40MB string) for the
+    # overwhelming majority of texts.
+    if (len(text) + 1) // 2 > FINE_CHUNK_MAX_WORDS and len(text.split()) > FINE_CHUNK_MAX_WORDS:
+        return LEGACY_CHUNK_WORDS, LEGACY_CHUNK_OVERLAP
+    return FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP
 
 
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> list[str]:
@@ -405,10 +428,10 @@ async def ingest_file(
     direction, never toward hiding a doc.
 
     ``chunk_words`` / ``chunk_overlap`` (issue #31): when omitted, company
-    chunking applies -- ``COMPANY_DOC_CHUNK_WORDS`` / ``COMPANY_DOC_CHUNK_OVERLAP``,
+    chunking applies -- ``FINE_CHUNK_WORDS`` / ``FINE_CHUNK_OVERLAP``,
     sized so a whole chunk fits the embedding model's 256-token window (see
     those constants) -- except that a doc over
-    ``COMPANY_DOC_FINE_CHUNK_MAX_WORDS`` falls back to the previous 512/50 so
+    ``FINE_CHUNK_MAX_WORDS`` falls back to the previous 512/50 so
     the synchronous embedding work can't grow ~4.6x for a huge file. An
     explicit value is always used as given. The attachment path passes
     ``ATTACHMENT_CHUNK_*`` to keep its old chunking. Docs ingested before this
@@ -424,16 +447,14 @@ async def ingest_file(
 
     inferred_domain = domain or declared_domain or infer_domain_from_path(path)
     if chunk_words is None and chunk_overlap is None:
-        if len(text.split()) > COMPANY_DOC_FINE_CHUNK_MAX_WORDS:
-            chunk_words, chunk_overlap = ATTACHMENT_CHUNK_WORDS, ATTACHMENT_CHUNK_OVERLAP
+        chunk_words, chunk_overlap = default_chunking(text)
+        if chunk_words == LEGACY_CHUNK_WORDS:
             logger.info(
                 "ingest_file: %s is over %d words -- using %d-word chunks instead of %d "
                 "to bound synchronous embedding time",
                 _sanitize_display_name(display_name or path.name),
-                COMPANY_DOC_FINE_CHUNK_MAX_WORDS, ATTACHMENT_CHUNK_WORDS, COMPANY_DOC_CHUNK_WORDS,
+                FINE_CHUNK_MAX_WORDS, LEGACY_CHUNK_WORDS, FINE_CHUNK_WORDS,
             )
-        else:
-            chunk_words, chunk_overlap = COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP
     elif chunk_words is None or chunk_overlap is None:
         raise ValueError("pass chunk_words and chunk_overlap together, or neither")
     chunks = chunk_text(text, chunk_size=chunk_words, overlap=chunk_overlap)
@@ -515,7 +536,7 @@ def ingest_text_sync(
     if not text.strip():
         return 0
 
-    chunks = chunk_text(text, chunk_size=512, overlap=50)
+    chunks = chunk_text(text, *default_chunking(text))
     extra = extra_metadata or {}
     metadatas: list[dict[str, Any]] = [
         {
@@ -566,20 +587,26 @@ async def ingest_builtin_file(
     store: ChromaDBStore,
     collection: str = ChromaDBStore.BUILTIN_COLLECTION,
     chunk_type: str = "builtin",
-    chunk_size: int = 512,
-    overlap: int = 50,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
 ) -> int:
     """Index a single built-in markdown file. Caller must delete old chunks first.
 
-    Defaults match the positive-playbook ingest path. Pass
-    ``collection=ChromaDBStore.FAILURES_COLLECTION`` (with ``chunk_type='failure_case'``
-    and smaller chunks) to ingest a single failure case study — keeps the
-    failure CRUD endpoints in lockstep with ``seed_failures``.
+    Chunking defaults to ``default_chunking`` (the fine profile), the same as
+    ``seed_builtin_knowledge`` / ``seed_failures``. Pass
+    ``collection=ChromaDBStore.FAILURES_COLLECTION`` (with ``chunk_type='failure_case'``)
+    to ingest a single failure case study — keeps the failure CRUD endpoints in
+    lockstep with ``seed_failures``. Every chunk carries the current
+    ``CHUNKING_VERSION`` so startup can tell a collection seeded before issue #32.
     """
     text = path.read_text(encoding="utf-8")
     if not text.strip():
         return 0
     domain = infer_domain_from_path(path)
+    if chunk_size is None and overlap is None:
+        chunk_size, overlap = default_chunking(text)
+    elif chunk_size is None or overlap is None:
+        raise ValueError("pass chunk_size and overlap together, or neither")
     chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
     metadatas: list[dict[str, Any]] = [
         {
@@ -588,10 +615,17 @@ async def ingest_builtin_file(
             "source": str(path),
             "chunk_index": i,
             "type": chunk_type,
+            "chunking": CHUNKING_VERSION,
         }
         for i in range(len(chunks))
     ]
     ids = [_make_chunk_id(str(path), i) for i in range(len(chunks))]
+    # Deliberately synchronous (no await): the CRUD routes delete this file's
+    # old rows, write it, then call this, and staying on the event loop keeps
+    # that sequence atomic against a concurrent PUT/DELETE of the same doc.
+    # Moving it to a thread would let an in-flight write resurrect rows a
+    # DELETE just removed. Cost: a large body blocks the loop for its embedding
+    # time (admin-only routes; see the FINE_CHUNK_MAX_WORDS bound).
     store.add_documents(
         texts=chunks,
         metadatas=metadatas,
@@ -615,6 +649,119 @@ def list_company_docs(docs_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
+_CHUNKING_PENDING = "pending"
+
+
+def _index_seed_files(
+    store: ChromaDBStore,
+    files: list[Path],
+    collection: str,
+    chunk_type: str,
+) -> tuple[int, set[str], set[str]]:
+    """Chunk and upsert each markdown file.
+
+    Returns (chunks written, their ids, sources of the files that were read).
+    A file's rows are written with a provisional ``chunking`` marker and only
+    stamped ``CHUNKING_VERSION`` after every batch landed (``add_documents``
+    upserts in batches of 100), so a crash between batches can't leave a
+    truncated file that reads as current.
+    """
+    total = 0
+    new_ids: set[str] = set()
+    read_sources: set[str] = set()
+    for md_file in files:
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # One bad file must not abort startup (or a half-done migration).
+            # Its source is left out of read_sources, so its existing rows are
+            # neither replaced nor deleted, and it is retried next boot.
+            logger.warning("skipping unreadable knowledge file: %s", _sanitize_display_name(md_file.name))
+            continue
+        read_sources.add(str(md_file))
+        if not text.strip():
+            continue
+        chunks = chunk_text(text, *default_chunking(text))
+        metadatas: list[dict[str, Any]] = [
+            {
+                "domain": infer_domain_from_path(md_file),
+                "filename": md_file.name,
+                "source": str(md_file),
+                "chunk_index": i,
+                "type": chunk_type,
+                "chunking": _CHUNKING_PENDING,
+            }
+            for i in range(len(chunks))
+        ]
+        ids = [_make_chunk_id(str(md_file), i) for i in range(len(chunks))]
+        store.add_documents(texts=chunks, metadatas=metadatas, ids=ids, collection=collection)
+        store.stamp_chunking(collection, ids, CHUNKING_VERSION)
+        total += len(chunks)
+        new_ids.update(ids)
+    return total, new_ids, read_sources
+
+
+def _seed_or_migrate(
+    store: ChromaDBStore,
+    files: list[Path],
+    collection: str,
+    chunk_type: str,
+    force: bool,
+) -> int:
+    """Seed an empty collection, or one-time re-chunk a populated one (issue #32).
+
+    A collection seeded before #32 holds 400-512-word chunks, most longer than
+    the embedding window. Migration is upsert-then-delete, never delete-then-
+    upsert: the new chunks are written first (same ids, so they overwrite), and
+    only then are the leftover old rows of the files that were actually read
+    removed. Rows are stamped current per file only after all of its batches
+    are written, so a crash at any point leaves rows that still read as stale
+    and the next startup finishes the job -- it can't strand a half-empty or
+    truncated collection. Only rows of ``chunk_type`` whose ``source`` is one of
+    the files being reseeded are ever replaced: external OER rows (other
+    ``type``) share the built-in collection, and rows indexed through the API
+    from a file no longer on this disk have nothing to be re-chunked from --
+    both are left as they are. A consequence: if the install path changed since
+    the store was seeded, no row's ``source`` matches, so nothing migrates (the
+    log line below says how many rows were left).
+
+    ``force=True`` reseeds every file and, like the automatic path, then drops
+    the leftover rows of the files it re-read (a file that shrank).
+
+    The whole pass is synchronous embedding inside the app lifespan (~15s for
+    the shipped corpus on a laptop, longer on a small VM); the API isn't
+    serving until it returns. It runs once per profile change and resumes
+    after an interruption.
+    """
+    stale_rows: dict[str, str | None] = {}
+    if force:
+        # "" matches no marker, so this lists every row of the type: after the
+        # upsert, any of a re-read file's rows that weren't rewritten (the file
+        # shrank) are removed, same as the automatic path.
+        stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, "")
+    elif store.get_collection_count(collection) > 0:
+        sources = {str(f) for f in files}
+        stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, CHUNKING_VERSION)
+        replaceable = sum(1 for source in stale_rows.values() if source in sources)
+        if stale_rows:
+            logger.info(
+                "%s: %d %s rows are not at %s; %d have a source file on disk and will be re-chunked "
+                "(one-time, issue #32), %d are left as-is",
+                collection, len(stale_rows), chunk_type, CHUNKING_VERSION, replaceable, len(stale_rows) - replaceable,
+            )
+        if not replaceable:
+            return 0
+
+    total, new_ids, read_sources = _index_seed_files(store, files, collection, chunk_type)
+    leftovers = [
+        row_id for row_id, source in stale_rows.items()
+        if source in read_sources and row_id not in new_ids
+    ]
+    if leftovers:
+        store.delete_ids(collection, leftovers)
+    return total
+
+
 async def seed_builtin_knowledge(
     store: ChromaDBStore | None = None,
     force: bool = False,
@@ -625,39 +772,13 @@ async def seed_builtin_knowledge(
         settings = get_settings()
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
 
-    if not force and store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION) > 0:
-        return 0
-
-    total = 0
-    for md_file in BUILTIN_KNOWLEDGE_PATH.rglob("*.md"):
-        # Skills live under builtin/skills/ but are indexed into a separate
-        # collection by openexecutive.knowledge.skills_index.seed_builtin_skills.
-        if any(p in md_file.relative_to(BUILTIN_KNOWLEDGE_PATH).parts for p in ("skills", "failures")):
-            continue
-        domain = infer_domain_from_path(md_file)
-        text = md_file.read_text(encoding="utf-8")
-        chunks = chunk_text(text)
-
-        metadatas: list[dict[str, Any]] = [
-            {
-                "domain": domain,
-                "filename": md_file.name,
-                "source": str(md_file),
-                "chunk_index": i,
-                "type": "builtin",
-            }
-            for i in range(len(chunks))
-        ]
-        ids = [_make_chunk_id(str(md_file), i) for i in range(len(chunks))]
-        store.add_documents(
-            texts=chunks,
-            metadatas=metadatas,
-            ids=ids,
-            collection=ChromaDBStore.BUILTIN_COLLECTION,
-        )
-        total += len(chunks)
-
-    return total
+    # Skills live under builtin/skills/ but are indexed into a separate
+    # collection by openexecutive.knowledge.skills_index.seed_builtin_skills.
+    files = [
+        f for f in BUILTIN_KNOWLEDGE_PATH.rglob("*.md")
+        if not any(p in f.relative_to(BUILTIN_KNOWLEDGE_PATH).parts for p in ("skills", "failures"))
+    ]
+    return _seed_or_migrate(store, files, ChromaDBStore.BUILTIN_COLLECTION, "builtin", force)
 
 
 async def seed_failures(
@@ -667,8 +788,11 @@ async def seed_failures(
     """Index all failure case studies from builtin/failures/<domain>/*.md.
 
     Idempotent: skipped if the failures collection is already non-empty,
-    unless force=True. Uses a smaller chunk size (400 words) to preserve
-    the narrative arc of each section (situation/root-cause/lessons).
+    unless force=True -- except that a collection chunked before issue #32
+    (400-word chunks, most longer than the embedding window) is re-chunked once
+    to the current profile (see ``_seed_or_migrate``). Uses the same fine
+    chunking as everything else; ``ingest_builtin_file`` (the failure CRUD
+    routes) does too, so a PUT produces the same chunks as seed time.
     """
     if store is None:
         from openexecutive.config import get_settings
@@ -676,37 +800,8 @@ async def seed_failures(
         settings = get_settings()
         store = ChromaDBStore(persist_directory=settings.vector_store_path)
 
-    if not force and store.get_collection_count(ChromaDBStore.FAILURES_COLLECTION) > 0:
-        return 0
-
     if not FAILURES_KNOWLEDGE_PATH.is_dir():
         logger.warning("failures knowledge path not found, skipping: %s", FAILURES_KNOWLEDGE_PATH)
         return 0
-
-    total = 0
-    for md_file in FAILURES_KNOWLEDGE_PATH.rglob("*.md"):
-        domain = infer_domain_from_path(md_file)
-        text = md_file.read_text(encoding="utf-8")
-        if not text.strip():
-            continue
-        chunks = chunk_text(text, chunk_size=400, overlap=40)
-        metadatas: list[dict[str, Any]] = [
-            {
-                "domain": domain,
-                "filename": md_file.name,
-                "source": str(md_file),
-                "chunk_index": i,
-                "type": "failure_case",
-            }
-            for i in range(len(chunks))
-        ]
-        ids = [_make_chunk_id(str(md_file), i) for i in range(len(chunks))]
-        store.add_documents(
-            texts=chunks,
-            metadatas=metadatas,
-            ids=ids,
-            collection=ChromaDBStore.FAILURES_COLLECTION,
-        )
-        total += len(chunks)
-
-    return total
+    files = list(FAILURES_KNOWLEDGE_PATH.rglob("*.md"))
+    return _seed_or_migrate(store, files, ChromaDBStore.FAILURES_COLLECTION, "failure_case", force)

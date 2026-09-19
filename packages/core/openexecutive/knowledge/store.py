@@ -152,6 +152,45 @@ class ChromaDBStore(KnowledgeStore):
         except Exception:
             pass
 
+    def stale_chunk_sources(self, collection: str, where: dict[str, Any], current: str) -> dict[str, str | None]:
+        """``{row id: source}`` for rows matching ``where`` whose ``chunking``
+        marker (issue #32) is not ``current`` -- rows that predate the marker
+        included. ``source`` is None when a row has none. Empty when nothing
+        matches or the collection can't be read, so a read failure can never
+        look like "stale rows to migrate"."""
+        try:
+            rows = self._client.get_collection(collection).get(where=where, include=["metadatas"])
+        except Exception:
+            return {}
+        stale: dict[str, str | None] = {}
+        for row_id, meta in zip(rows.get("ids") or [], rows.get("metadatas") or [], strict=False):
+            meta = meta or {}
+            if meta.get("chunking") != current:
+                source = meta.get("source")
+                stale[row_id] = source if isinstance(source, str) else None
+        return stale
+
+    def stamp_chunking(self, collection: str, ids: list[str], version: str) -> None:
+        """Set the ``chunking`` marker (issue #32) on existing rows, without
+        re-embedding them. Called only once every batch of a document has been
+        written, so a crash between batches leaves rows that still read as stale.
+        Raises on failure: an unstamped file must not be reported as migrated."""
+        col = self._get_or_create_collection(collection)
+        batch_size = 100
+        for i in range(0, len(ids), batch_size):
+            batch = ids[i : i + batch_size]
+            col.update(ids=batch, metadatas=[{"chunking": version}] * len(batch))
+
+    def delete_ids(self, collection: str, ids: list[str]) -> None:
+        """Delete rows by id. Logs and swallows failure: callers (the #32
+        migration) leave the rows marked stale, so the next startup retries."""
+        if not ids:
+            return
+        try:
+            self._get_or_create_collection(collection).delete(ids=ids)
+        except Exception:
+            logger.exception("delete_ids: failed to delete %d rows from %s", len(ids), collection)
+
     def delete_company_docs(self) -> None:
         """Delete and recreate the company_docs collection, clearing all indexed documents."""
         import contextlib

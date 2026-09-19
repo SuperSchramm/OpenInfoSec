@@ -334,9 +334,9 @@ async def delete_builtin_file(domain: str, filename: str, request: Request) -> d
 
 # ---------------------------------------------------------------------------
 # Failures (negative learnings) — separate ChromaDB collection (failure_cases)
-# but managed via the same CRUD shape as builtin playbooks. Chunked smaller
-# (400 words, 40 overlap) to match seed_failures so a re-index produces the
-# same artifacts whether done at seed-time or via PUT.
+# but managed via the same CRUD shape as builtin playbooks. Chunked with the
+# same default as seed_failures (loader.default_chunking) so a re-index produces
+# the same artifacts whether done at seed-time or via PUT.
 # ---------------------------------------------------------------------------
 
 
@@ -389,8 +389,6 @@ async def create_failure_file(body: BuiltinFileWrite, request: Request) -> Built
         _get_store(request),
         collection=ChromaDBStore.FAILURES_COLLECTION,
         chunk_type="failure_case",
-        chunk_size=400,
-        overlap=40,
     )
     return BuiltinWriteResponse(domain=body.domain, filename=body.filename, chunks_indexed=chunks)
 
@@ -419,8 +417,6 @@ async def update_failure_file(
         store,
         collection=ChromaDBStore.FAILURES_COLLECTION,
         chunk_type="failure_case",
-        chunk_size=400,
-        overlap=40,
     )
     return BuiltinWriteResponse(domain=domain, filename=filename, chunks_indexed=chunks)
 

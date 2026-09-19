@@ -20,9 +20,9 @@ from openexecutive.knowledge import loader as loader_mod
 from openexecutive.knowledge.loader import (
     ATTACHMENT_CHUNK_OVERLAP,
     ATTACHMENT_CHUNK_WORDS,
-    COMPANY_DOC_CHUNK_OVERLAP,
-    COMPANY_DOC_CHUNK_WORDS,
-    COMPANY_DOC_FINE_CHUNK_MAX_WORDS,
+    FINE_CHUNK_MAX_WORDS,
+    FINE_CHUNK_OVERLAP,
+    FINE_CHUNK_WORDS,
     chunk_text,
     ingest_file,
 )
@@ -54,30 +54,30 @@ def _doc(tmp_path: Path, n_words: int) -> Path:
 
 
 def test_constants_are_sane_and_attachments_keep_the_old_size() -> None:
-    assert 0 <= COMPANY_DOC_CHUNK_OVERLAP < COMPANY_DOC_CHUNK_WORDS
+    assert 0 <= FINE_CHUNK_OVERLAP < FINE_CHUNK_WORDS
     assert 0 <= ATTACHMENT_CHUNK_OVERLAP < ATTACHMENT_CHUNK_WORDS
     assert (ATTACHMENT_CHUNK_WORDS, ATTACHMENT_CHUNK_OVERLAP) == (512, 50)
-    assert COMPANY_DOC_CHUNK_WORDS < ATTACHMENT_CHUNK_WORDS
+    assert FINE_CHUNK_WORDS < ATTACHMENT_CHUNK_WORDS
 
 
 def test_ingest_file_defaults_to_the_company_chunk_size(tmp_path: Path) -> None:
     store = _ingest(_doc(tmp_path, 1000))
-    assert store.texts == chunk_text(_words(1000), COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP)
+    assert store.texts == chunk_text(_words(1000), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP)
     assert len(store.texts) > 1
-    assert all(len(t.split()) <= COMPANY_DOC_CHUNK_WORDS for t in store.texts)
+    assert all(len(t.split()) <= FINE_CHUNK_WORDS for t in store.texts)
 
 
 def test_ingest_file_chunk_size_can_be_overridden(tmp_path: Path) -> None:
     store = _ingest(_doc(tmp_path, 1000), chunk_words=512, chunk_overlap=50)
     assert store.texts == chunk_text(_words(1000), 512, 50)
-    assert len(store.texts) < len(chunk_text(_words(1000), COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP))
-    assert max(len(t.split()) for t in store.texts) > COMPANY_DOC_CHUNK_WORDS
+    assert len(store.texts) < len(chunk_text(_words(1000), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
+    assert max(len(t.split()) for t in store.texts) > FINE_CHUNK_WORDS
 
 
 def test_a_doc_at_the_fine_chunking_limit_still_uses_company_chunks(tmp_path: Path) -> None:
-    n = COMPANY_DOC_FINE_CHUNK_MAX_WORDS
+    n = FINE_CHUNK_MAX_WORDS
     store = _ingest(_doc(tmp_path, n))
-    assert store.texts == chunk_text(_words(n), COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP)
+    assert store.texts == chunk_text(_words(n), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP)
 
 
 def test_a_huge_doc_falls_back_to_the_legacy_chunking_to_bound_embedding_work(tmp_path: Path) -> None:
@@ -85,10 +85,10 @@ def test_a_huge_doc_falls_back_to_the_legacy_chunking_to_bound_embedding_work(tm
     size means ~4.6x more chunks, so an enormous file would freeze the process
     ~4.6x longer than before. Past the limit the old sizes apply -- nothing is
     dropped, and the worst case is exactly what it was pre-#31."""
-    n = COMPANY_DOC_FINE_CHUNK_MAX_WORDS + 1
+    n = FINE_CHUNK_MAX_WORDS + 1
     store = _ingest(_doc(tmp_path, n))
     assert store.texts == chunk_text(_words(n), ATTACHMENT_CHUNK_WORDS, ATTACHMENT_CHUNK_OVERLAP)
-    fine = len(chunk_text(_words(n), COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP))
+    fine = len(chunk_text(_words(n), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
     assert len(store.texts) * 4 < fine  # the work really is several times smaller
 
 
@@ -104,7 +104,7 @@ def test_the_fallback_log_line_uses_a_sanitized_filename(
     log = MagicMock()
     monkeypatch.setattr(loader_mod, "logger", log)
     path = tmp_path / "evil\nFORGED LOG LINE.md"
-    path.write_text(_words(COMPANY_DOC_FINE_CHUNK_MAX_WORDS + 1), encoding="utf-8")
+    path.write_text(_words(FINE_CHUNK_MAX_WORDS + 1), encoding="utf-8")
 
     _ingest(path)
 
@@ -114,7 +114,7 @@ def test_the_fallback_log_line_uses_a_sanitized_filename(
 
 
 def test_an_explicit_chunk_size_is_honoured_even_for_a_huge_doc(tmp_path: Path) -> None:
-    n = COMPANY_DOC_FINE_CHUNK_MAX_WORDS + 1
+    n = FINE_CHUNK_MAX_WORDS + 1
     store = _ingest(_doc(tmp_path, n), chunk_words=60, chunk_overlap=5)
     assert store.texts == chunk_text(_words(n), 60, 5)
 
@@ -170,7 +170,7 @@ def test_every_company_chunk_fits_the_embedding_window() -> None:
     tok = Tokenizer.from_file(str(_tokenizer_json()))
     tok.no_truncation()
     tok.no_padding()
-    counts = [len(tok.encode(c).ids) for c in chunk_text(_POLICY_SAMPLE, COMPANY_DOC_CHUNK_WORDS, COMPANY_DOC_CHUNK_OVERLAP)]
+    counts = [len(tok.encode(c).ids) for c in chunk_text(_POLICY_SAMPLE, FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP)]
     assert max(counts) <= 256, f"a company chunk exceeds the 256-token window: {max(counts)}"
     # ...and the old size really didn't fit, so this test isn't vacuous.
     old = [len(tok.encode(c).ids) for c in chunk_text(_POLICY_SAMPLE, ATTACHMENT_CHUNK_WORDS, ATTACHMENT_CHUNK_OVERLAP)]
