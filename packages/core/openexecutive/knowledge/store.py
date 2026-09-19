@@ -173,21 +173,19 @@ class ChromaDBStore(KnowledgeStore):
                 stale[row_id] = source if isinstance(source, str) else None
         return stale
 
-    def indexed_files(self, collection: str, where: dict[str, Any]) -> set[tuple[str, str]] | None:
-        """``(domain, filename)`` of every document with rows matching ``where``.
-
-        Keyed by name rather than ``source`` path so an install that moved on
-        disk isn't mistaken for "all files are new". None when the collection
-        can't be read: callers must treat that as "unknown", never as "empty"."""
+    def all_chunk_sources(self, collection: str, where: dict[str, Any]) -> dict[str, str | None] | None:
+        """``{row id: source}`` for every row matching ``where``. None when the
+        collection can't be read: callers must treat that as "unknown", never as
+        "empty"."""
         try:
             rows = self._client.get_collection(collection).get(where=where, include=["metadatas"])
         except Exception:
             return None
-        return {
-            (str(meta.get("domain")), str(meta.get("filename")))
-            for meta in (rows.get("metadatas") or [])
-            if meta
-        }
+        sources: dict[str, str | None] = {}
+        for row_id, meta in zip(rows.get("ids") or [], rows.get("metadatas") or [], strict=False):
+            source = (meta or {}).get("source")
+            sources[row_id] = source if isinstance(source, str) else None
+        return sources
 
     def _seed_manifest_path(self, collection: str) -> Path:
         return self.persist_directory / f"seed_manifest_{collection}.json"

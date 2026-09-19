@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
 import unicodedata
@@ -731,6 +732,48 @@ def _manifest_keys(files: list[Path], root: Path) -> dict[Path, str]:
     return {f: f.relative_to(root).as_posix() for f in files}
 
 
+def _is_gone(path: Path) -> bool:
+    """True only when ``path`` is definitely absent. ``Path.exists()`` reports any
+    stat failure (permissions, an unreachable mount, ESTALE) as "missing", and a
+    broken symlink as missing; here only a real "no such file" counts, so an
+    unreadable location is treated as still present."""
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _claim_rows(rows: dict[str, str | None], files: list[Path], root: Path) -> dict[str, Path]:
+    """Map stored rows (``{row id: stored source}``) to the shipped file each belongs to.
+
+    By exact ``source`` path first. Failing that -- the install moved, so the
+    stored path is a stale absolute path (issue #37) -- by *location*: the
+    stored path must be absolute, no longer exist, and end with the same
+    ``<corpus folder>/<domain>/.../<file>`` a shipped file has under ``root``
+    (``.../builtin/strategy/alpha.md`` under a different prefix). An arbitrary
+    stale path that merely shares a filename is never adopted, and neither is a
+    row whose own source file is still on disk. Rows nothing claims (API-authored
+    docs whose file went with the image, exotic paths) are left alone.
+    """
+    by_source = {str(f): f for f in files}
+    by_tail = {f.relative_to(root).parts: f for f in files}
+    owner: dict[str, Path] = {}
+    for row_id, source in rows.items():
+        file = by_source.get(source) if source else None
+        if file is None and source and Path(source).is_absolute() and _is_gone(Path(source)):
+            parts = Path(source).parts
+            for i, part in enumerate(parts[:-1]):
+                if part == root.name and (found := by_tail.get(parts[i + 1 :])) is not None:
+                    file = found
+                    break
+        if file is not None:
+            owner[row_id] = file
+    return owner
+
+
 def _seed_or_migrate(
     store: ChromaDBStore,
     files: list[Path],
@@ -763,8 +806,12 @@ def _seed_or_migrate(
     being reseeded are replaced: external OER rows (other ``type``) share the
     built-in collection, and rows indexed through the API from a file no longer
     on this disk have nothing to be re-chunked from -- both are left as they
-    are. (If the install path changed since seeding, no row's ``source``
-    matches and nothing re-chunks; the log line says how many rows were left.)
+    are. A row belongs to a shipped file by exact ``source`` path, or -- when
+    the install moved and the stored path no longer exists -- by the same
+    location under a different prefix (``_claim_rows``, issue #37); the log
+    line says how many rows nothing claimed. So an API-authored doc is
+    superseded only by a shipped file at the very same corpus-relative
+    location, never by one that merely shares its name.
 
     On a populated collection a failure is logged and startup carries on (the
     same files are retried next boot); on a fresh seed or ``force`` it
@@ -778,6 +825,7 @@ def _seed_or_migrate(
     keys = _manifest_keys(files, root)
     manifest = store.read_seed_manifest(collection)
     stale_rows: dict[str, str | None] = {}
+    owner: dict[str, Path] = {}
     targets = files
     populated = not force and store.get_collection_count(collection) > 0
     if force:
@@ -787,20 +835,20 @@ def _seed_or_migrate(
         stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, "")
     elif populated:
         stale_rows = store.stale_chunk_sources(collection, {"type": chunk_type}, CHUNKING_VERSION)
-        by_source = {str(f): f for f in files}
-        stale_files = {by_source[s] for s in stale_rows.values() if s in by_source}
+        owner = _claim_rows(stale_rows, files, root)
+        stale_files = set(owner.values())
         if manifest is None:
-            present = store.indexed_files(collection, {"type": chunk_type})
-            if present is not None:  # None = unreadable: learn nothing, add nothing
-                manifest = {key for f, key in keys.items() if (infer_domain_from_path(f, root), f.name) in present}
+            everything = store.all_chunk_sources(collection, {"type": chunk_type})
+            if everything is not None:  # None = unreadable: learn nothing, add nothing
+                present = set(_claim_rows(everything, files, root).values())
+                manifest = {key for f, key in keys.items() if f in present}
         unseen = {f for f in files if manifest is not None and keys[f] not in manifest}
         targets = [f for f in files if f in stale_files or f in unseen]
         if stale_rows:
             logger.info(
-                "%s: %d %s rows are not at %s; %d have a source file on disk and will be re-chunked "
+                "%s: %d %s rows are not at %s; %d belong to a shipped file and will be re-chunked "
                 "(one-time, issue #32), %d are left as-is",
-                collection, len(stale_rows), chunk_type, CHUNKING_VERSION,
-                sum(1 for s in stale_rows.values() if s in by_source), sum(1 for s in stale_rows.values() if s not in by_source),
+                collection, len(stale_rows), chunk_type, CHUNKING_VERSION, len(owner), len(stale_rows) - len(owner),
             )
         if not targets:
             if manifest is not None and store.read_seed_manifest(collection) is None:
@@ -816,9 +864,11 @@ def _seed_or_migrate(
                          collection, len(targets), chunk_type)
         return 0
 
+    if force:
+        owner = _claim_rows(stale_rows, files, root)
     leftovers = [
-        row_id for row_id, source in stale_rows.items()
-        if source in result.read and row_id not in result.ids
+        row_id for row_id, file in owner.items()
+        if str(file) in result.indexed and row_id not in result.ids
     ]
     if leftovers:
         store.delete_ids(collection, leftovers)

@@ -499,7 +499,7 @@ def test_an_unreadable_store_adds_nothing(corpus: dict[str, Any], monkeypatch: p
     asyncio.run(seed_builtin_knowledge(store=store))
     (store.persist_directory / f"seed_manifest_{ChromaDBStore.BUILTIN_COLLECTION}.json").unlink()  # force a bootstrap
     (corpus["alpha"].parent / "extra.md").write_text(_words(200, "x"), encoding="utf-8")
-    monkeypatch.setattr(store, "indexed_files", lambda *a, **k: None)
+    monkeypatch.setattr(store, "all_chunk_sources", lambda *a, **k: None)
     assert asyncio.run(seed_builtin_knowledge(store=store)) == 0
 
 
@@ -510,9 +510,9 @@ def test_new_failure_case_files_are_picked_up_too(corpus: dict[str, Any]) -> Non
     assert asyncio.run(seed_failures(store=store)) == len(chunk_text(_words(240, "fail"), FINE_CHUNK_WORDS, FINE_CHUNK_OVERLAP))
 
 
-def test_indexed_files_is_none_for_a_missing_collection(tmp_path: Path) -> None:
+def test_all_chunk_sources_is_none_for_a_missing_collection(tmp_path: Path) -> None:
     store = ChromaDBStore(persist_directory=tmp_path / "chroma")
-    assert store.indexed_files("no_such_collection", {"type": "builtin"}) is None
+    assert store.all_chunk_sources("no_such_collection", {"type": "builtin"}) is None
 
 
 # ---- manifest: what a previous startup saw, not "has rows" (review of the new-file pickup)
@@ -692,3 +692,159 @@ def test_a_forced_reseed_with_no_files_leaves_the_manifest_alone(corpus: dict[st
     monkeypatch.setattr(loader_mod, "BUILTIN_KNOWLEDGE_PATH", tmp_path / "not-mounted")
     asyncio.run(seed_builtin_knowledge(store=store, force=True))
     assert store.read_seed_manifest(ChromaDBStore.BUILTIN_COLLECTION) == {"strategy/alpha.md", "finance/beta.md"}
+
+
+# ---- issue #37: an install that moved on disk (stored `source` paths are stale)
+
+def _move_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    moved = tmp_path / "moved-install" / "builtin"
+    moved.parent.mkdir()
+    (tmp_path / "builtin").rename(moved)
+    monkeypatch.setattr(loader_mod, "BUILTIN_KNOWLEDGE_PATH", moved)
+    monkeypatch.setattr(loader_mod, "FAILURES_KNOWLEDGE_PATH", moved / "failures")
+    return moved
+
+
+def test_a_forced_reseed_after_the_install_moved_replaces_rows_instead_of_duplicating_them(
+    corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_builtin_knowledge(store=store))
+    count = store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION)
+    old_ids = _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+    moved = _move_install(tmp_path, monkeypatch)
+
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+
+    assert store.get_collection_count(ChromaDBStore.BUILTIN_COLLECTION) == count, "no duplicate rows"
+    assert not old_ids & _ids(store, ChromaDBStore.BUILTIN_COLLECTION), "the old-path rows are gone"
+    got = store._get_or_create_collection(ChromaDBStore.BUILTIN_COLLECTION).get(include=["metadatas"])
+    assert all(m["source"].startswith(str(moved)) for m in got["metadatas"])
+
+
+def test_a_pre_32_store_is_re_chunked_after_the_install_moved(
+    corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old limitation: no row's source matched the new paths, so nothing re-chunked."""
+    store = corpus["store"]
+    old_alpha = tmp_path / "builtin" / "strategy" / "alpha.md"
+    old = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", old_alpha)
+    _move_install(tmp_path, monkeypatch)  # alpha now lives elsewhere; the stored path no longer exists
+
+    asyncio.run(seed_builtin_knowledge(store=store))
+
+    assert not set(old) & _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+    assert _stale(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin") == {}
+
+
+def test_a_row_is_not_taken_over_when_its_own_source_file_still_exists(corpus: dict[str, Any], tmp_path: Path) -> None:
+    """Same corpus-relative location, but the stored source is a live file (a
+    second checkout that still exists)."""
+    store = corpus["store"]
+    live = tmp_path / "elsewhere" / "builtin" / "strategy" / "alpha.md"
+    live.parent.mkdir(parents=True)
+    live.write_text(WORDS_FOR_37, encoding="utf-8")
+    keep = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", live, tag="-live")
+
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+
+    assert set(keep) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_a_stale_path_that_only_shares_the_filename_is_never_adopted(corpus: dict[str, Any], tmp_path: Path) -> None:
+    """An API-authored doc from somewhere unrelated, same domain and filename as
+    a shipped file: nothing about its location says it is that file."""
+    store = corpus["store"]
+    gone = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", tmp_path / "old-install" / "strategy" / "alpha.md", tag="-amb")
+
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+
+    assert set(gone) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_a_relative_stored_source_is_never_judged_against_the_working_directory(corpus: dict[str, Any]) -> None:
+    store = corpus["store"]
+    rel = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", Path("builtin/strategy/alpha.md"), tag="-rel")
+
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+
+    assert set(rel) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_a_moved_install_is_recognised_only_at_the_same_corpus_relative_location(
+    corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = corpus["store"]
+    right = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", tmp_path / "old" / "builtin" / "strategy" / "alpha.md", tag="-right")
+    wrong = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", tmp_path / "old" / "builtin" / "finance" / "alpha.md", tag="-wrong")
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+
+    assert not set(right) & _ids(store, ChromaDBStore.BUILTIN_COLLECTION), "same .../builtin/strategy/alpha.md location: superseded"
+    assert set(wrong) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION), "different domain folder: not the same file"
+
+
+WORDS_FOR_37 = " ".join(f"z{i}" for i in range(200))
+
+
+# ---- round 2 review of #37
+
+def test_an_unstatable_stored_path_counts_as_present_not_gone(
+    corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stat failure that isn't "no such file" (permissions, a lost mount) must
+    not let the row be adopted and deleted."""
+    store = corpus["store"]
+    unreachable = tmp_path / "old" / "builtin" / "strategy" / "alpha.md"
+    keep = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", unreachable, tag="-perm")
+    real_lstat = loader_mod.os.lstat
+
+    def lstat(path: Any, *a: Any, **k: Any) -> Any:
+        if str(path) == str(unreachable):
+            raise PermissionError("mount lost")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(loader_mod.os, "lstat", lstat)
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+    assert set(keep) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_a_broken_symlink_as_stored_source_is_not_adopted(corpus: dict[str, Any], tmp_path: Path) -> None:
+    store = corpus["store"]
+    link = tmp_path / "old" / "builtin" / "strategy" / "alpha.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path / "nowhere.md")
+    keep = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", link, tag="-link")
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+    assert set(keep) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_a_blank_shipped_file_never_erases_the_rows_it_would_replace(corpus: dict[str, Any], tmp_path: Path) -> None:
+    """A zero-byte file from a bad image build must not delete stored content."""
+    store = corpus["store"]
+    corpus["alpha"].write_text("", encoding="utf-8")
+    keep = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", tmp_path / "old" / "builtin" / "strategy" / "alpha.md", tag="-blank")
+    exact = _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", corpus["alpha"], tag="-exact")
+
+    asyncio.run(seed_builtin_knowledge(store=store, force=True))
+
+    assert set(keep) | set(exact) <= _ids(store, ChromaDBStore.BUILTIN_COLLECTION)
+
+
+def test_bootstrap_does_not_treat_an_unrelated_same_name_doc_as_the_shipped_one(corpus: dict[str, Any], tmp_path: Path) -> None:
+    """No manifest yet; the only stored strategy/alpha.md rows come from an
+    unrelated location. The shipped alpha.md is therefore new and gets indexed."""
+    store = corpus["store"]
+    _seed_old_style(store, ChromaDBStore.BUILTIN_COLLECTION, "builtin", tmp_path / "unrelated" / "strategy" / "alpha.md", tag="-other")
+    added = asyncio.run(seed_builtin_knowledge(store=store))
+    assert added == corpus["alpha_n"] + corpus["beta_n"]
+
+
+def test_a_forced_reseed_after_a_move_also_replaces_failure_case_rows(
+    corpus: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = corpus["store"]
+    asyncio.run(seed_failures(store=store))
+    count = store.get_collection_count(ChromaDBStore.FAILURES_COLLECTION)
+    _move_install(tmp_path, monkeypatch)
+    asyncio.run(seed_failures(store=store, force=True))
+    assert store.get_collection_count(ChromaDBStore.FAILURES_COLLECTION) == count

@@ -554,8 +554,11 @@ knowledge:
         Only `type=builtin` rows whose `source` file is still on disk are
         replaced; external OER rows (same collection) and rows from docs
         added via the API whose file is gone with the image are left as they
-        are (if the install path changed since seeding no `source` matches and
-        nothing migrates; the startup log reports the counts). Rows are
+        are (a row belongs to a shipped file by exact `source`, or, when the install
+        moved and the stored path is gone, by the same corpus-relative
+        location under a different prefix, so a moved install re-chunks and
+        `force=True` replaces rather than duplicates; a mere name match is
+        never enough; the startup log reports the counts). Rows are
         stamped current per file only after all its batches are written, and an
         unreadable file keeps its old rows. The pass is synchronous embedding
         inside the app lifespan. `force=True` also drops the leftover rows of
