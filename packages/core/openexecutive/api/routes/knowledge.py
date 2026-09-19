@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import errno
 import os
 import re
 from collections import defaultdict
@@ -7,13 +9,16 @@ from pathlib import Path
 from typing import NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from openexecutive.config import get_settings
+from openexecutive.knowledge import overlay_fs
 from openexecutive.knowledge.loader import (
     BUILTIN_KNOWLEDGE_PATH,
     DOMAIN_MAP,
     FAILURES_DIRNAME,
     FAILURES_KNOWLEDGE_PATH,
+    MAX_KNOWLEDGE_DOC_CHARS,
     builtin_overlay_root,
     tombstone_path,
 )
@@ -21,7 +26,9 @@ from openexecutive.knowledge.store import ChromaDBStore
 
 router = APIRouter(prefix="/knowledge")
 
-_VALID_FILENAME = re.compile(r"^[a-zA-Z0-9_\-]+\.md$")
+# Bounded so the overlay's temp file (".<name>.<12 hex>.tmp") still fits a 255-byte
+# filesystem name limit.
+_VALID_FILENAME = re.compile(r"^[a-zA-Z0-9_\-]{1,120}\.md$")
 _VALID_SOURCE_ID = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 
@@ -48,7 +55,7 @@ class BuiltinFileContent(BaseModel):
 class BuiltinFileWrite(BaseModel):
     domain: str
     filename: str
-    content: str
+    content: str = Field(max_length=MAX_KNOWLEDGE_DOC_CHARS)
 
 
 class BuiltinListResponse(BaseModel):
@@ -70,7 +77,7 @@ def _validate_filename(filename: str) -> None:
     if not _VALID_FILENAME.match(filename):
         raise HTTPException(
             status_code=400,
-            detail="Filename must be alphanumeric with dashes or underscores and end in .md",
+            detail="Filename must be alphanumeric with dashes or underscores (at most 120 characters) and end in .md",
         )
 
 
@@ -150,23 +157,70 @@ def _list_files(shipped_root: Path, overlay_root: Path) -> list[BuiltinFileMeta]
 
 def _drop_rows(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
     """Remove the indexed rows of a doc under either of its possible paths (a
-    doc authored before issue #36 may still have rows under its old shipped path)."""
+    doc authored before issue #36 may still have rows under its old shipped path).
+
+    ``delete_documents`` swallows every error, so verify the rows are really gone:
+    a caller that then removes the file would otherwise leave content retrievable
+    with no way to delete it (the retry would report 404).
+    """
     for path in (paths.shipped, paths.custom):
         store.delete_documents(collection=collection, where={"source": str(path)})
+        if store.all_chunk_sources(collection, {"source": str(path)}):
+            raise HTTPException(status_code=500, detail="Indexed content could not be removed; retry")
+
+
+def _overlay_error(exc: OSError) -> HTTPException:
+    """Map an overlay filesystem failure to an HTTP error a caller can act on."""
+    if isinstance(exc, overlay_fs.UnsafeOverlayPath):
+        return HTTPException(status_code=400, detail="Path escapes the knowledge overlay")
+    if exc.errno in (errno.ENOSPC, errno.EDQUOT):
+        return HTTPException(status_code=507, detail="The knowledge overlay volume is full")
+    return HTTPException(status_code=500, detail="The knowledge overlay could not be written")
 
 
 def _write_overlay(paths: _DocPaths, content: str) -> None:
-    paths.custom.parent.mkdir(parents=True, exist_ok=True)
-    paths.custom.write_text(content, encoding="utf-8")
-    paths.tombstone.unlink(missing_ok=True)  # re-creating a deleted shipped doc
+    root = builtin_overlay_root()
+    overlay_fs.sweep_stale_temp(root)
+    custom_rel, tombstone_rel = paths.custom.relative_to(root), paths.tombstone.relative_to(root)
+    previous = overlay_fs.file_size(root, custom_rel)
+    new_size = len(content.encode("utf-8"))
+    # The budget is a soft quota on the overlay's markdown bytes only (the embeddings
+    # these documents produce live in the vector store and are not metered), and the
+    # check and the write are separate steps, so concurrent workers can overshoot by
+    # about one document each. It bounds disk growth, not embedding CPU: a same-size
+    # rewrite costs nothing against it (issue #39 residual).
+    # Only growth can breach the budget: shrinking an edit must stay possible even
+    # when the overlay is already over a budget that was lowered later.
+    if new_size > previous and overlay_fs.total_bytes(root) - previous + new_size > get_settings().builtin_overlay_max_bytes:
+        raise HTTPException(status_code=413, detail="The knowledge overlay is full")
+    existed = paths.custom.exists()
+    try:
+        overlay_fs.write_text(root, custom_rel, content)
+        try:
+            overlay_fs.unlink(root, tombstone_rel)  # re-creating a deleted shipped doc
+        except OSError:
+            if not existed:  # don't leave a half-created doc: a file with no rows and a 400 for the caller
+                with contextlib.suppress(OSError):
+                    overlay_fs.unlink(root, custom_rel)
+            raise
+    except OSError as exc:
+        raise _overlay_error(exc) from exc
 
 
 def _delete_doc(store: ChromaDBStore, collection: str, paths: _DocPaths) -> None:
-    _drop_rows(store, collection, paths)
-    paths.custom.unlink(missing_ok=True)
-    if paths.shipped.exists():
-        paths.tombstone.parent.mkdir(parents=True, exist_ok=True)
-        paths.tombstone.touch()
+    root = builtin_overlay_root()
+    custom_rel = paths.custom.relative_to(root)
+    try:
+        # Tombstone first: if it can't be written nothing has changed. Then the
+        # rows, then the overlay copy. A failure in the last two leaves the copy on
+        # disk, so the doc is still visible and a retry of the DELETE works (the
+        # reverse order would leave rows for a doc the retry reports as gone).
+        if paths.shipped.exists():
+            overlay_fs.touch(root, paths.tombstone.relative_to(root))
+        _drop_rows(store, collection, paths)
+        overlay_fs.unlink(root, custom_rel)
+    except OSError as exc:
+        raise _overlay_error(exc) from exc
 
 
 def _get_store(request: Request):  # type: ignore[return]

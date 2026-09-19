@@ -308,8 +308,8 @@ def test_a_failed_overlay_write_on_an_edit_leaves_the_doc_indexed(env: dict[str,
     before = _n(store, ChromaDBStore.BUILTIN_COLLECTION, shipped / "strategy" / "shipped_doc.md")
     assert before > 0
 
-    with pytest.raises(OSError):  # the volume can't be written; the test client re-raises the server error
-        client.put("/knowledge/builtin/strategy/shipped_doc.md", json={"domain": "strategy", "filename": "shipped_doc.md", "content": EDITED})
+    res = client.put("/knowledge/builtin/strategy/shipped_doc.md", json={"domain": "strategy", "filename": "shipped_doc.md", "content": EDITED})
+    assert res.status_code == 500, "an unwritable volume is an operational failure, not a security refusal"
 
     assert _n(store, ChromaDBStore.BUILTIN_COLLECTION, shipped / "strategy" / "shipped_doc.md") == before
 

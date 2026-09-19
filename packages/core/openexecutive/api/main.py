@@ -498,6 +498,18 @@ def create_app() -> FastAPI:
         for o in os.environ.get("BACKEND_ALLOWED_ORIGINS", "").split(",")
         if o.strip()
     ]
+    # Refuse oversized knowledge-doc writes before they are buffered (issue #39).
+    # Registered BEFORE CORS, so it sits inside it: the 413 still goes out through
+    # CORSMiddleware and carries the CORS headers a browser needs to show it. The
+    # shared-secret gate is outside both, so an unauthenticated caller gets a 401
+    # without the body being read at all.
+    from openexecutive.api.body_limit import BodyLimitMiddleware
+    from openexecutive.knowledge.loader import MAX_KNOWLEDGE_BODY_BYTES
+
+    app.add_middleware(
+        BodyLimitMiddleware,
+        limits={"/knowledge/builtin": MAX_KNOWLEDGE_BODY_BYTES, "/knowledge/failures": MAX_KNOWLEDGE_BODY_BYTES},
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", *extra_origins],

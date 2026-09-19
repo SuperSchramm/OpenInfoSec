@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # writes there vanish on redeploy while their vector-store rows survive on
     # the volume. Default: a `builtin_custom` folder next to the vector store.
     builtin_overlay_path: Path | None = Field(None, alias="BUILTIN_OVERLAY_PATH")
+    # Total markdown bytes the overlay may hold (issue #39): the API refuses further
+    # growth (413) beyond it, so a runaway caller can't pile documents onto the
+    # volume that also holds the vector store and the SQLite databases. The
+    # embeddings those documents produce are not metered here.
+    builtin_overlay_max_bytes: int = Field(25_000_000, alias="BUILTIN_OVERLAY_MAX_BYTES", ge=0)
     company_profile_path: Path = Field(
         _ROOT / "company" / "profile.yaml", alias="COMPANY_PROFILE_PATH"
     )

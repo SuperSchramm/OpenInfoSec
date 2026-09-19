@@ -65,6 +65,22 @@ FINE_CHUNK_OVERLAP = 20
 # it did, N x ~8s instead of N x ~1.8s for N near-limit docs.
 FINE_CHUNK_MAX_WORDS = 60_000
 
+# Largest document the API will accept for the built-in / failure-case corpus
+# (issue #39). ~60,000 words is FINE_CHUNK_MAX_WORDS, past which chunking falls
+# back to the legacy profile; at ~7 characters a word that is ~420k characters, rounded up to 500k for
+# markdown markup and long words.
+# Embedding runs synchronously on the event loop, so an unbounded body would
+# freeze the API for its whole embedding time.
+MAX_KNOWLEDGE_DOC_CHARS = 500_000
+# Most request-body bytes a write to the built-in / failure-case API may carry:
+# 500k characters, each at worst a 12-byte JSON escape (a character outside the
+# Basic Multilingual Plane is written as a \\uXXXX\\uXXXX surrogate pair), plus
+# headroom for the other fields. Enforced before the body is buffered
+# (api/body_limit.py); the character cap above still applies after parsing, and
+# characters can be up to 4 UTF-8 bytes each, so the overlay's own byte budget is
+# what bounds disk use.
+MAX_KNOWLEDGE_BODY_BYTES = 12 * MAX_KNOWLEDGE_DOC_CHARS + 8192
+
 # The pre-#31 chunking, kept where a larger chunk is the right trade.
 LEGACY_CHUNK_WORDS = 512
 LEGACY_CHUNK_OVERLAP = 50

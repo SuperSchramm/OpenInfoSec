@@ -545,7 +545,24 @@ knowledge:
         the overlay so it stays deleted (unlisted, unread, not re-seeded)
         across redeploys, and re-creating it removes the tombstone. Overlay
         paths are realpath-checked against the true overlay root (for both
-        the routes and the seed walk) so a symlink can't lead out of it. An
+        the routes and the seed walk) so a symlink can't lead out of it, and
+        every write, tombstone and unlink goes through `overlay_fs`
+        (`O_NOFOLLOW` + `dir_fd`, component by component from the resolved
+        root) so a path swapped for a symlink between the check and the write
+        is refused (issue #39; Windows, without those flags, keeps only the
+        up-front check). A document is replaced atomically (temp file +
+        rename, so a failure part-way keeps the old doc), a hardlink, FIFO or
+        `..`/absolute path at the target is refused, and `overlay_fs`
+        failures map to 400 (unsafe path) vs 507/500 (full/unwritable volume).
+        A document is capped at
+        `loader.MAX_KNOWLEDGE_DOC_CHARS` (500k characters, 422 above it), the
+        request body at `MAX_KNOWLEDGE_BODY_BYTES` (~6 MB, 413) by
+        `api/body_limit.BodyLimitMiddleware` BEFORE it is buffered (a
+        pydantic `max_length` alone only fires after the whole body is read),
+        the overlay's markdown at `BUILTIN_OVERLAY_MAX_BYTES` (default 25 MB, 413
+        when a write would grow it past that; replacing a doc credits its old
+        size; embeddings in the vector store are not metered, and temp files a
+        killed writer left behind are swept after an hour). An
         overlay copy or tombstone shadows the shipped doc permanently: a later
         image that ships an updated version of that path is ignored until the
         overlay entry is deleted (a re-POST/PUT replaces it). The list endpoints return
