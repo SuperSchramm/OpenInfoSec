@@ -177,6 +177,21 @@ def _resolve_logger(request: Request) -> AuditLogger:
     return get_audit_logger()
 
 
+def _require_principal(request: Request) -> None:
+    """403 unless the caller is the principal (issue #43).
+
+    The audit log holds every user's message previews, tool inputs and results,
+    and cost, so its read routes are for the principal (the owner/operator)
+    alone. Checked before any lookup, so a refusal reveals nothing about which
+    events or sessions exist. A request with no `x-caller-email` (CLI or direct
+    curl holding the shared secret) resolves to the principal, as elsewhere."""
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+    from openexecutive.people.store import is_principal_or_self
+
+    if not is_principal_or_self(_resolve_caller_person_id(request), None):
+        raise HTTPException(status_code=403, detail="The audit log is restricted to the principal")
+
+
 class AuditLogRequest(BaseModel):
     event_type: str
     summary: str
@@ -204,6 +219,7 @@ def create_audit_log(body: AuditLogRequest, request: Request) -> dict[str, int |
 
 @router.get("/audit/logs/{event_id}", response_model=AuditEventDetailOut)
 def get_audit_log(event_id: int, request: Request) -> AuditEventDetailOut:
+    _require_principal(request)
     audit = _resolve_logger(request)
     event = audit.get(event_id)
     if event is None:
@@ -483,6 +499,7 @@ def get_audit_session(session_id: str, request: Request) -> AuditSessionResponse
     Capped at 1000 events per session (the upper limit `query()` enforces);
     a runaway agent session would clip the tail rather than OOM the API.
     """
+    _require_principal(request)
     if not _SESSION_ID_RE.match(session_id):
         raise HTTPException(status_code=400, detail="invalid session_id format")
     audit = _resolve_logger(request)
@@ -524,6 +541,7 @@ def list_audit_logs(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> AuditListResponse:
+    _require_principal(request)
     audit = _resolve_logger(request)
     events = audit.query(
         event_type=event_type,
@@ -576,6 +594,7 @@ def get_audit_usage(
     rows. Unlike `/audit/sessions/{id}` (one session), this spans the whole log
     so an operator can see overall token spend and where it goes.
     """
+    _require_principal(request)
     audit = _resolve_logger(request)
     data = audit.usage_summary(since=since, until=until)
     return UsageSummary(

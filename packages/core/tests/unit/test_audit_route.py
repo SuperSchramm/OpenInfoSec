@@ -9,6 +9,23 @@ from fastapi.testclient import TestClient
 
 from openexecutive.api.routes import audit as audit_route
 from openexecutive.audit import AuditLogger, set_audit_logger
+from openexecutive.people import store as people_store
+
+ALEX = {"x-caller-email": "alex@example.com"}  # principal
+SABIN = {"x-caller-email": "sabin@example.com"}  # rostered teammate
+STRANGER = {"x-caller-email": "stranger@example.com"}  # signed in, not rostered
+
+
+@pytest.fixture(autouse=True)
+def _principal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The audit read routes are principal-only (issue #43). Use an isolated
+    people store with one principal and one teammate, never the developer's real
+    database (these tests used to pass only because a local dev DB happened to
+    hold a principal). A request with no caller header resolves to the principal."""
+    monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
+    people_store.initialize_db()
+    people_store.upsert_person(full_name="Alex", is_principal=True, email="alex@example.com")
+    people_store.upsert_person(full_name="Sabin", email="sabin@example.com")
 
 
 @pytest.fixture()
@@ -261,3 +278,68 @@ def test_usage_endpoint_empty_db_is_all_zero(tmp_path: Path) -> None:
     assert data["totals"]["cost_usd"] == 0.0
     assert data["by_day"] == []
     assert data["by_model"] == []
+
+
+# --- issue #43: the audit read routes are principal-only -------------------
+
+
+READ_ROUTES = [
+    "/audit/logs",
+    "/audit/logs/1",
+    "/audit/sessions/s1",
+    "/audit/usage",
+]
+
+
+@pytest.mark.parametrize("path", READ_ROUTES)
+def test_the_principal_can_read_every_audit_route(client: TestClient, path: str) -> None:
+    assert client.get(path, headers=ALEX).status_code == 200
+
+
+@pytest.mark.parametrize("path", READ_ROUTES)
+@pytest.mark.parametrize("who", [SABIN, STRANGER], ids=["rostered-teammate", "unrostered"])
+def test_nobody_else_can_read_any_audit_route(client: TestClient, path: str, who: dict[str, str]) -> None:
+    resp = client.get(path, headers=who)
+    assert resp.status_code == 403
+    assert "restricted to the principal" in resp.json()["detail"]
+
+
+def test_a_refusal_reveals_nothing_about_which_events_or_sessions_exist(client: TestClient) -> None:
+    """The check runs before any lookup: a real id and a made-up one look identical."""
+    real = client.get("/audit/sessions/s1", headers=SABIN)
+    fake = client.get("/audit/sessions/no-such-session", headers=SABIN)
+    assert (real.status_code, real.json()) == (fake.status_code, fake.json())
+    real_e = client.get("/audit/logs/1", headers=SABIN)
+    fake_e = client.get("/audit/logs/99999", headers=SABIN)
+    assert (real_e.status_code, real_e.json()) == (fake_e.status_code, fake_e.json())
+
+
+def test_a_teammate_cannot_get_around_the_check_with_filters(client: TestClient) -> None:
+    for params in ({"session_id": "s1"}, {"q": "runway"}, {"actor": "user"}, {"limit": 1000}):
+        assert client.get("/audit/logs", params=params, headers=SABIN).status_code == 403
+
+
+def test_a_request_with_no_caller_header_is_the_principal(client: TestClient) -> None:
+    """CLI / direct curl holding the shared secret: same fallback as the chat routes."""
+    assert client.get("/audit/logs").status_code == 200
+
+
+def test_an_archived_principal_is_not_the_principal(client: TestClient) -> None:
+    alex = people_store.find_principal_person()
+    assert alex is not None
+    people_store.archive_person(alex.id)
+    assert client.get("/audit/logs", headers=ALEX).status_code == 403
+
+
+def test_with_no_principal_configured_nobody_reads_the_audit_log(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh install before onboarding: no principal exists, so the routes stay closed."""
+    monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "empty-people.db")
+    people_store.initialize_db()
+    assert client.get("/audit/logs", headers=ALEX).status_code == 403
+    assert client.get("/audit/logs").status_code == 403
+
+
+def test_writing_an_audit_row_is_not_changed_by_this_fix(client: TestClient) -> None:
+    """POST /audit/log is how the UI server records sign-ins; only reads are gated here."""
+    r = client.post("/audit/log", json={"event_type": "auth_login", "summary": "sign-in"}, headers=SABIN)
+    assert r.status_code == 201

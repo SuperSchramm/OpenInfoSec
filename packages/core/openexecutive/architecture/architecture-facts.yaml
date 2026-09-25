@@ -1448,6 +1448,17 @@ chat:
 audit:
   purpose: Persistent, searchable record of valuable events. Separate from episodic memory (which biases future LLM behaviour) — audit is for humans to inspect what the system did.
   db: ./episodic_memory.db (shares the SQLite file used by episodic/alerts/cache — one file to look in)
+  access: |
+    The audit READ routes (GET /audit/logs, /audit/logs/{id}, /audit/sessions/{id},
+    /audit/usage) are principal-only (issue #43): the log holds every user's
+    message previews, tool inputs/results and cost, so anyone else, including a
+    rostered teammate or an unrostered signed-in user, gets 403 before any lookup
+    (a real and a made-up id look identical). A request with no `x-caller-email`
+    (CLI / direct curl holding the shared secret) resolves to the principal, as in
+    the chat routes; with no principal configured (fresh install before
+    onboarding) the routes stay closed. POST /audit/log (how the UI server records
+    sign-ins) is not gated. The UI's Audit and Token usage pages therefore
+    only work for the principal.
   table: audit_log (id, ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
   event_types:
     - chat_turn — one row per user-facing turn (latency, tokens, session)
