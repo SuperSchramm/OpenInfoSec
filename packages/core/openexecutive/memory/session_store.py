@@ -110,7 +110,8 @@ def list_sessions(
 
     Legacy rows with caller_person_id IS NULL (created before this column
     existed) are excluded — the comparison `NULL = ?` never matches in
-    SQLite. They remain reachable by direct session_id URL.
+    SQLite. Only the principal can still open them by id (see
+    `api.routes.chat._session_access`).
     """
     resolved = _resolve_db_path(db_path)
     if not resolved.exists():
@@ -139,6 +140,21 @@ def delete_session(session_id: str, db_path: Path | None = None) -> bool:
         conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
         cur = conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         return cur.rowcount > 0
+
+
+def get_session_owner(session_id: str, db_path: Path | None = None) -> tuple[bool, int | None]:
+    """``(exists, caller_person_id)`` for one session."""
+    resolved = _resolve_db_path(db_path)
+    if not resolved.exists():
+        return False, None
+    with _get_conn(resolved) as conn:
+        row = conn.execute(
+            "SELECT caller_person_id FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    if row is None:
+        return False, None
+    owner = row["caller_person_id"]
+    return True, (int(owner) if owner is not None else None)
 
 
 def get_session_metadata(session_id: str, db_path: Path | None = None) -> dict[str, Any] | None:

@@ -420,6 +420,23 @@ def find_person_by_channel_ref(
     return finder(ref) if db_path is None else finder(ref, db_path)
 
 
+def is_principal_or_self(
+    caller_person_id: int | None, person_id: int | None, db_path: Path | None = None
+) -> bool:
+    """Whether ``caller_person_id`` may act on something ``person_id`` owns:
+    it is that person, or the principal. An unresolved caller never may, and
+    something with no owner (``person_id`` None) is the principal's alone.
+
+    The one authorization rule behind reading, continuing and deleting a chat,
+    kept here so the HTTP routes and the chat turn cannot drift apart."""
+    if caller_person_id is None:
+        return False
+    if person_id is not None and caller_person_id == person_id:
+        return True
+    caller = get_person(caller_person_id, db_path=db_path)
+    return bool(caller is not None and caller.is_principal and not caller.archived)
+
+
 def find_principal_person(db_path: Path | None = None) -> Person | None:
     """Return the principal Person (the operator running this instance), or None.
 

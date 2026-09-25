@@ -8,7 +8,7 @@ import re
 import sqlite3
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -144,6 +144,147 @@ def _resolve_caller_person_id(request: Request) -> int | None:
         return None
 
 
+# Who started each chat this process has served. Lets a caller the roster
+# can't resolve (a fresh install with no principal yet, or an allowlisted user
+# who isn't on the roster) keep talking in a chat they started, without opening
+# every ownerless session to every unresolved caller. In-memory like
+# `_sessions`, so it does not survive a restart.
+_session_starters: dict[str, frozenset[str]] = {}
+
+SessionAccess = Literal["missing", "allowed", "forbidden", "orphaned"]
+
+
+def _caller_keys(request: Request, caller_person_id: int | None) -> frozenset[str]:
+    """Every identity the caller holds: their Person id and their verified
+    email (the UI proxy re-stamps `x-caller-email` from the signed-in session).
+
+    Both are kept so a starter still matches after they become resolvable: a
+    user who started a chat before being added to the roster (or while the
+    lookup failed) carries the same email once they resolve to a Person. With
+    neither -- CLI or direct curl, no principal yet -- it is local trust."""
+    keys: set[str] = set()
+    if caller_person_id is not None:
+        keys.add(f"person:{caller_person_id}")
+    email = (request.headers.get("x-caller-email") or "").strip().lower()
+    if email:
+        keys.add(f"email:{email}")
+    return frozenset(keys or {"local"})
+
+
+def _is_session_starter(request: Request, session_id: str, caller_person_id: int | None) -> bool:
+    starter = _session_starters.get(session_id)
+    return starter is not None and bool(starter & _caller_keys(request, caller_person_id))
+
+
+def _is_channel_namespaced(session_id: str) -> bool:
+    """Ids with a `prefix:` namespace (`slack:dm:...`, `telegram:...`) belong to
+    the channel adapters, which create their rows server-side. Web chats get a
+    bare uuid."""
+    return ":" in session_id
+
+
+def _session_access(request: Request, session_id: str, caller_person_id: int | None) -> SessionAccess:
+    """May this caller read, continue or delete ``session_id``?
+
+    Session ids are guessable (`slack:dm:<user id>`, `telegram:<chat id>`), so an
+    id alone proves nothing. The session's owner or the principal may
+    (`is_principal_or_self`; an ownerless legacy row is the principal's alone).
+    The one other way in is having started it in this process: that is how an
+    unresolved caller continues their own chat, whose row has no owner.
+
+    - "missing": neither a stored row nor a live chat has that id.
+    - "orphaned": a stored row with no owner that nobody in this process
+      started -- typically an unresolved caller's chat after a restart. Refused
+      like "forbidden", but /chat starts a fresh chat instead of failing.
+    """
+    from openexecutive.memory.session_store import get_session_owner
+    from openexecutive.people.store import is_principal_or_self
+
+    exists, owner = get_session_owner(session_id)
+    started_here = session_id in _session_starters
+    if not exists and not started_here:
+        return "missing"
+    if exists and is_principal_or_self(caller_person_id, owner):
+        return "allowed"
+    if (not exists or owner is None) and _is_session_starter(request, session_id, caller_person_id):
+        return "allowed"
+    if exists and owner is None and not started_here:
+        return "orphaned"
+    return "forbidden"
+
+
+def _is_current_session(session: Any) -> bool:
+    """Whether ``session`` is still the live one for its id -- False once it was
+    deleted (or its id reclaimed after a reset) while a turn held it."""
+    return _sessions.get(session.session_id) is session
+
+
+def forget_session(session_id: str) -> bool:
+    """Drop a deleted session's in-process state; True if there was any.
+
+    Without this, a later turn naming the deleted id would pick the cached
+    `Session` (history and all) back up out of `_sessions`."""
+    had_starter = _session_starters.pop(session_id, None) is not None
+    had_session = _sessions.pop(session_id, None) is not None
+    return had_starter or had_session
+
+
+def _select_requested_session(
+    request: Request, session_id: str | None, caller_person_id: int | None
+) -> tuple[str | None, SessionAccess]:
+    """Decide which session id a chat turn may use: ``(id or None, access)``.
+
+    A client-supplied id must be the caller's own chat; any id the turn can't
+    use becomes ``None`` (a fresh chat) with access "missing". As a side effect
+    it evicts stale state for an id nobody owns (see the comments below).
+    """
+    requested_id = (session_id or "").strip() or None
+    if requested_id is None:
+        return None, "missing"
+    access = _session_access(request, requested_id, caller_person_id)
+    if access in ("forbidden", "orphaned"):
+        # Someone else's chat, or an ownerless one nobody here can vouch for
+        # (its starter was lost to a restart). Continue in a fresh chat: that
+        # neither fails every send nor answers differently for "exists but not
+        # yours" than for an unknown namespaced id, so the guessable ones
+        # (`slack:dm:<user id>`) can't be probed for which chats exist. (A bare
+        # web id is a uuid4, so not guessable.)
+        logger.warning("chat.session_refused access=%s session_id=%s", access, requested_id)
+        return None, "missing"
+    if access != "missing":
+        return requested_id, access
+    # No stored row and no live starter, so any cached Session under this id is
+    # stale -- its row was removed by a fixture reset or a client-slot switch,
+    # neither of which clears `_sessions`. Never hand that transcript to
+    # whoever names the id next.
+    _sessions.pop(requested_id, None)
+    if _is_channel_namespaced(requested_id):
+        # A web caller minting an adapter's id would squat it: the adapter's
+        # INSERT OR IGNORE keeps the first owner, so whoever claimed
+        # `slack:dm:<someone>` first would own that person's DM history. Start
+        # a fresh chat instead.
+        logger.warning("chat.session_id_reserved session_id=%s", requested_id)
+        return None, "missing"
+    # Claiming an unused id. Any messages already stored under it are orphans
+    # (a delete that raced a streaming turn, a reset mid-turn, or rows left
+    # before this check existed): clear them so this caller neither loads them
+    # as history nor becomes their owner.
+    from openexecutive.memory.session_store import delete_session
+
+    delete_session(requested_id)
+    return requested_id, "missing"
+
+
+def _should_bind_owner(request: Request, requested_id: str | None, caller_person_id: int | None) -> bool:
+    """Whether this turn may bind the session row to the caller.
+
+    Only the chat's starter binds an ownerless row to themselves. Anyone else
+    allowed in (the principal) must not take it over just by continuing it."""
+    if requested_id is None or requested_id not in _session_starters:
+        return True
+    return _is_session_starter(request, requested_id, caller_person_id)
+
+
 async def _run_chat_turn(
     *,
     message: str,
@@ -170,7 +311,18 @@ async def _run_chat_turn(
     turn_id = uuid.uuid4().hex
     collector = DebugCollector(t0=t0, turn_id=turn_id)
 
-    session = _get_or_create_session(session_id, request)
+    # Resolve the caller. Used for Honcho's per-person memory AND for
+    # tagging the session row's owner (so /sessions can filter the
+    # sidebar by signed-in user). See `_resolve_caller_person_id` for
+    # the precedence rule that protects against cross-identity leakage.
+    caller_person_id = _resolve_caller_person_id(request)
+
+    requested_id, access = _select_requested_session(request, session_id, caller_person_id)
+    bind_owner = _should_bind_owner(request, requested_id, caller_person_id)
+
+    session = _get_or_create_session(requested_id, request)
+    if access == "missing":
+        _session_starters.setdefault(session.session_id, _caller_keys(request, caller_person_id))
     is_first_turn = len(session.conversation_history) == 0
 
     logger.info(
@@ -193,12 +345,6 @@ async def _run_chat_turn(
         full={"message": message},
     )
 
-    # Resolve the caller. Used for Honcho's per-person memory AND for
-    # tagging the session row's owner (so /sessions can filter the
-    # sidebar by signed-in user). See `_resolve_caller_person_id` for
-    # the precedence rule that protects against cross-identity leakage.
-    caller_person_id = _resolve_caller_person_id(request)
-
     # Persist the session row immediately (idempotent INSERT OR IGNORE) so a
     # mid-turn failure never leaves a ghost in-memory session with no DB row.
     # `caller_person_id` is bound here on the first turn; INSERT OR IGNORE means
@@ -209,7 +355,7 @@ async def _run_chat_turn(
             session.session_id,
             title,
             session.created_at.isoformat(),
-            caller_person_id=caller_person_id,
+            caller_person_id=caller_person_id if bind_owner else None,
         )
     except Exception:  # pragma: no cover - DB write should not block the turn
         logger.exception("chat.session_persist_failed turn_id=%s", turn_id)
@@ -390,6 +536,11 @@ async def _run_chat_turn(
                 # Discord / Slack / Telegram / Email / Google Chat) records
                 # the response uniformly. Don't duplicate it here.
                 if not full_response:
+                    return
+                if not _is_current_session(session):
+                    # The chat was deleted (or its id reclaimed after a reset)
+                    # while this turn streamed: saving now would leave orphan
+                    # messages under a deleted id.
                     return
                 if not is_first_turn:
                     update_session_timestamp(session.session_id)
