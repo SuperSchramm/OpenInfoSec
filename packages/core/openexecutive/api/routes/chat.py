@@ -31,11 +31,6 @@ logger = logging.getLogger(__name__)
 
 _sessions: dict[str, Any] = {}
 
-# Most-recent completed turn's debug events, for the /debug/last-turn endpoint.
-# Single-process only; replaced wholesale at the end of every turn.
-_last_turn_events: list[dict[str, Any]] = []
-_last_turn_meta: dict[str, Any] = {}
-
 _TITLE_MAX_LEN = 60
 
 
@@ -541,19 +536,6 @@ async def _run_chat_turn(
             yield f"data: {error}\n\n"
             done = json.dumps({"type": "done", "session_id": session.session_id})
             yield f"data: {done}\n\n"
-        finally:
-            # Snapshot for /debug/last-turn.
-            global _last_turn_events, _last_turn_meta
-            _last_turn_events = [collector.to_sse_dict(e) for e in collector._events]
-            _last_turn_meta = {
-                "turn_id": turn_id,
-                "session_id": session.session_id,
-                "is_first_turn": is_first_turn,
-                "chunks": chunk_count,
-                "duration_s": round(time.monotonic() - exec_t0, 3),
-                "timed_out": timed_out,
-                "client_disconnected": client_disconnected,
-            }
 
     return StreamingResponse(
         event_generator(),
@@ -647,15 +629,6 @@ async def chat_upload(
         attachment_blocks=image_blocks or None,
         request=request,
     )
-
-
-@router.get("/debug/last-turn")
-def get_last_turn() -> dict[str, Any]:
-    """Returns the most recently completed turn's debug events.
-
-    Single-process only — for local debugging when SSE itself failed.
-    """
-    return {"meta": _last_turn_meta, "events": _last_turn_events}
 
 
 # ---------------------------------------------------------------------------

@@ -36,8 +36,6 @@ def _all_sessions(db_path: Path) -> list[dict[str, Any]]:
 @pytest.fixture(autouse=True)
 def _reset_route_state() -> None:
     chat_route._sessions.clear()
-    chat_route._last_turn_events.clear()
-    chat_route._last_turn_meta.clear()
 
 
 @pytest.fixture()
@@ -106,9 +104,14 @@ def test_chat_endpoint_handles_hanging_executive(
     assert rows[0]["title"] == "trigger hang"
 
 
-def test_last_turn_debug_endpoint_returns_events(
+def test_debug_events_reach_only_the_callers_own_stream_and_last_turn_is_gone(
     temp_db: Path, patched_deps: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """GET /debug/last-turn used to hand the most recent turn (session id, every
+    debug event, the retrieval query text) to ANY signed-in caller. The events
+    still go to the caller on their own SSE stream; the endpoint is removed."""
+    import json
+
     from openexecutive.orchestrator import executive as exec_mod
 
     class _MiniExecutive:
@@ -128,14 +131,14 @@ def test_last_turn_debug_endpoint_returns_events(
 
     chat_resp = client.post("/chat", json={"message": "hello"})
     assert chat_resp.status_code == 200
-    _ = chat_resp.text
-
-    last = client.get("/debug/last-turn").json()
-    assert last["meta"]["chunks"] == 1
-    kinds = [e["kind"] for e in last["events"]]
+    events = [
+        json.loads(line[len("data: "):])
+        for line in chat_resp.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    kinds = [e["kind"] for e in events if e.get("type") == "debug_event"]
     assert "knowledge_retrieved" in kinds
     assert "turn_complete" in kinds
-    # All events carry the same turn_id.
-    turn_ids = {e.get("turn_id") for e in last["events"]}
-    assert len(turn_ids) == 1
-    assert next(iter(turn_ids)) == last["meta"]["turn_id"]
+
+    assert client.get("/debug/last-turn").status_code == 404
+    assert not hasattr(chat_route, "_last_turn_events"), "no process-wide snapshot of anyone's turn"
