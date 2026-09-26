@@ -874,6 +874,16 @@ async def handle_cancel_calendar_event(tool_input: dict[str, Any]) -> str:
     if instance is None:
         return json.dumps({"error": f"decision_instance {instance_id} not found"})
 
+    # Issue #51: the same rule as POST /decisions/{id}/cancel -- only the
+    # principal or the person it was routed to, and only on a verified surface.
+    from openexecutive.alerts.decision_access import may_see_decision, tool_refusal
+
+    refused = tool_refusal(
+        "cancel_calendar_event", lambda pid: may_see_decision(pid, instance.approver_person_id)
+    )
+    if refused is not None:
+        return refused
+
     if instance.status not in (
         "approved_unchanged", "approved_with_edit", "executed", "proposed"
     ):

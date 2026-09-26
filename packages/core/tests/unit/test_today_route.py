@@ -310,6 +310,7 @@ def test_today_surfaces_decision_instance_id(
     also land in the 'action' lane (it's routed)."""
     db = tmp_path / "decision.db"
     _setup_isolated_db(db, monkeypatch)
+    people_store.upsert_person(full_name="Owner", is_principal=True, db_path=db)  # decisions are owner-scoped (issue #51)
 
     alert_store.insert_alert(
         source="decision_scheduling",
@@ -337,6 +338,7 @@ def test_today_decision_id_skips_malformed_tag(
     the list — the parser keeps scanning."""
     db = tmp_path / "malformed.db"
     _setup_isolated_db(db, monkeypatch)
+    people_store.upsert_person(full_name="Owner", is_principal=True, db_path=db)  # decisions are owner-scoped (issue #51)
 
     alert_store.insert_alert(
         source="decision_scheduling",
@@ -694,6 +696,7 @@ def test_activity_includes_workflow_initiative_decision_alert(
     resolved gated decisions, and raised alerts each surface with their kind."""
     db = tmp_path / "act_broad.db"
     _setup_isolated_db(db, monkeypatch)
+    people_store.upsert_person(full_name="Owner", is_principal=True, db_path=db)  # decisions are owner-scoped (issue #51)
 
     # Completed workflow run → workflow_done.
     wf_persistence.create_run("run-1", "morning_brief", "Morning brief", {}, db_path=db)

@@ -716,7 +716,9 @@ def _payload_headline(payload_json: str | None) -> str | None:
     return None
 
 
-def _build_activity(limit: int) -> ActivityResponse:
+def _build_activity(
+    limit: int, *, scope_to_caller: bool = False, caller_person_id: int | None = None
+) -> ActivityResponse:
     """Aggregate recent self-initiated Executive activity across sources.
 
     Sources, all pulled from the shared SQLite database:
@@ -843,7 +845,11 @@ def _build_activity(limit: int) -> ActivityResponse:
 
     # Gated decisions that reached a terminal state (approved / rejected /
     # reversed / …). The pending ones are surfaced as proposals, not activity.
+    from openexecutive.alerts.decision_access import may_see_decision
+
     for instance in decision_ledger.list_recent_resolved(limit=pool):
+        if scope_to_caller and not may_see_decision(caller_person_id, instance.approver_person_id):
+            continue  # someone else's proposal (issue #51)
         label = _DECISION_STATUS_LABEL.get(instance.status, "Resolved")
         detail = (
             _payload_headline(instance.final_payload_json)
@@ -1088,6 +1094,26 @@ async def _regen_briefing_narrative(
     ))
 
 
+def _scope_to_caller(response: TodayResponse) -> bool:
+    """Drop other people's decision proposals from the briefing (issue #51) and
+    say whether a narrative may be attached.
+
+    A decision alert carries the meeting title, times, attendees and description,
+    so it is shown only to the principal and the person it was routed to; other
+    alerts are unchanged. A signed-in caller the roster cannot resolve gets no
+    narrative either (it would be the whole-company one), unless no principal
+    exists yet (a fresh install, before onboarding, has no decisions to hide)."""
+    from openexecutive.alerts.decision_access import may_see_decision
+    from openexecutive.people.store import find_principal_person
+
+    caller = response.caller_person_id
+    response.proposals = [
+        p for p in response.proposals
+        if p.decision_instance_id is None or may_see_decision(caller, p.routed_to_person_id)
+    ]
+    return caller is not None or find_principal_person() is None
+
+
 @router.get("/today", response_model=TodayResponse, tags=["today"])
 async def get_today(request: Request, background_tasks: BackgroundTasks) -> TodayResponse:
     stale: list[StaleInsight] = []
@@ -1096,16 +1122,18 @@ async def get_today(request: Request, background_tasks: BackgroundTasks) -> Toda
     response.caller_person_id = _resolve_caller_person_id(request)
     if stale:
         background_tasks.add_task(_regen_stale_insights, stale)
-    _attach_narrative(
-        response,
-        caller_person_id=response.caller_person_id,
-        background_tasks=background_tasks,
-    )
+    if _scope_to_caller(response):
+        _attach_narrative(
+            response,
+            caller_person_id=response.caller_person_id,
+            background_tasks=background_tasks,
+        )
     return response
 
 
 @router.get("/today/activity", response_model=ActivityResponse, tags=["today"])
 def get_today_activity(
+    request: Request,
     limit: int = Query(20, ge=1, le=100),
 ) -> ActivityResponse:
     """Recent self-initiated Executive activity for the briefing rail.
@@ -1117,7 +1145,11 @@ def get_today_activity(
     # Defensive secondary check in case the signature changes later.
     if limit < 1 or limit > 100:
         raise HTTPException(status_code=400, detail="limit must be in [1, 100]")
-    return _build_activity(limit)
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+
+    return _build_activity(
+        limit, scope_to_caller=True, caller_person_id=_resolve_caller_person_id(request)
+    )
 
 
 @router.get(
@@ -1156,7 +1188,8 @@ def get_morning_brief(request: Request, response: Response) -> TodayResponse:
     payload.caller_person_id = _resolve_caller_person_id(request)
     # Serve the viewer's cached narrative (cache-only — this deprecated alias
     # has no BackgroundTasks to schedule a regen).
-    _attach_narrative(
-        payload, caller_person_id=payload.caller_person_id, background_tasks=None
-    )
+    if _scope_to_caller(payload):
+        _attach_narrative(
+            payload, caller_person_id=payload.caller_person_id, background_tasks=None
+        )
     return payload

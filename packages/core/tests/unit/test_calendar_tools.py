@@ -486,11 +486,21 @@ def test_cancel_event_marks_reversed() -> None:
     iid = r["decision_instance_id"]
     mark_resolved(iid, "approved_unchanged", external_event_id="evt-999", db_path=DB_PATH)
 
+    from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
+    _add_person("Owner", "owner@example.com", is_principal=True)
+    from openexecutive.people.store import find_principal_person
+
+    principal = find_principal_person()
+    assert principal is not None
+    token = current_turn_caller.set(TurnCaller(person_id=principal.id, from_web_chat=True))
     gw = _fake_gateway()
-    with (
-        patch("openexecutive.orchestrator.mcp_gateway.get_active_gateway", return_value=gw),
-    ):
-        raw = asyncio.run(handle_cancel_calendar_event({"decision_instance_id": iid}))
+    try:
+        with (
+            patch("openexecutive.orchestrator.mcp_gateway.get_active_gateway", return_value=gw),
+        ):
+            raw = asyncio.run(handle_cancel_calendar_event({"decision_instance_id": iid}))
+    finally:
+        current_turn_caller.reset(token)
     result = json.loads(raw)
     assert result["status"] == "cancelled"
     gw.call_tool.assert_awaited_once()

@@ -1513,6 +1513,19 @@ audit:
     approver is the principal's alone. A non-owner gets the same 404 as an unknown
     id on GET/approve/reject/cancel; GET /decisions lists only what the caller may
     see; GET /audit/reliability is principal-only (403).
+    Issue #51: the same rule covers every other path to a decision proposal. GET
+    /today and /morning-brief drop a decision's companion alert (its meeting title,
+    times, attendees) for anyone but the principal and the routed approver (other
+    alerts are unchanged), and a signed-in caller the roster cannot resolve gets no
+    company-wide narrative while a principal exists. GET /today/activity hides other
+    people's resolved decisions. POST /alerts/{id}/ack and the ack_alert chat tool
+    are owner-only for decision alerts (404 on the route, same as an unknown id),
+    and the cancel_calendar_event chat tool is owner-only too. The two tools also
+    require a verified speaker (the signed-in web chat records one), so Slack,
+    Discord, Telegram, email, the scheduler and workflows fail closed for these
+    actions. The open-alert digest injected into each web chat turn is scoped the
+    same way (briefing/context.py, scope_to_caller). Shared helpers:
+    alerts/decision_access.py.
   table: audit_log (id, ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
   event_types:
     - chat_turn — one row per user-facing turn (latency, tokens, session)

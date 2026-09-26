@@ -234,3 +234,40 @@ def test_chat_committee_route_passes_peer_memory_context(
         captured["stream_chat_with_committee"]["peer_memory_context"]
         == "COMMITTEE-PEER-MEMORY"
     )
+
+
+def test_chat_route_scopes_the_open_alert_digest_to_the_caller(
+    temp_db: Path, patched_deps: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #51: the open-alert digest injected into a turn carries decision
+    proposals (meeting title, attendees), so the route must ask for it scoped to
+    the signed-in caller."""
+    people_store.upsert_person(full_name="Alex", is_principal=True, email="alex@example.com")
+    sabin = people_store.upsert_person(full_name="Sabin", email="sabin@example.com")
+    _install_capturing_executive(monkeypatch, {})
+
+    from openexecutive.briefing import context as briefing_context
+    from openexecutive.knowledge import retriever as retriever_mod
+    from openexecutive.memory import honcho_client as honcho_mod
+
+    async def fake_prefetch(*_a: Any, **_kw: Any) -> str:
+        return ""
+
+    monkeypatch.setattr(retriever_mod, "retrieve", lambda **_: "")
+    monkeypatch.setattr(honcho_mod, "prefetch", fake_prefetch)
+    seen: dict[str, Any] = {}
+
+    def spy(*_a: Any, **kwargs: Any) -> str:
+        seen.update(kwargs)
+        return ""
+
+    monkeypatch.setattr(briefing_context, "format_open_alerts_for_prompt", spy)
+
+    app = FastAPI()
+    app.include_router(chat_route.router)
+    resp = TestClient(app).post(
+        "/chat", json={"message": "what is on the board"}, headers={"x-caller-email": "sabin@example.com"}
+    )
+    assert resp.status_code == 200
+    _ = resp.text
+    assert seen == {"scope_to_caller": True, "caller_person_id": sabin}

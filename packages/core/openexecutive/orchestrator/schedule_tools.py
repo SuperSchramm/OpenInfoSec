@@ -1528,6 +1528,17 @@ async def handle_ack_alert(tool_input: dict[str, Any]) -> str:
     existing = alert_store.get_alert(alert_id)
     if existing is None:
         return json.dumps({"error": f"alert {alert_id} not found"})
+    from openexecutive.alerts.decision_access import (
+        is_decision_alert,
+        may_handle_alert,
+        tool_refusal,
+    )
+
+    if is_decision_alert(existing):
+        # Someone else's decision proposal (issue #51): only its owner or the principal.
+        refused = tool_refusal("ack_alert", lambda pid: may_handle_alert(pid, existing))
+        if refused is not None:
+            return refused
     prior_status = existing.status
     if prior_status == status:
         return json.dumps(

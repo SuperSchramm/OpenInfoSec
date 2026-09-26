@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from openexecutive.alerts import store
@@ -19,7 +19,15 @@ class AckBody(BaseModel):
 
 
 @router.post("/alerts/{alert_id}/ack", response_model=Alert)
-def ack_alert(alert_id: int, body: AckBody) -> Alert:
+def ack_alert(alert_id: int, body: AckBody, request: Request) -> Alert:
+    # A decision proposal's alert is its owner's to clear (issue #51); someone
+    # else gets the same 404 as an unknown id, so ids can't be probed.
+    from openexecutive.alerts.decision_access import may_handle_alert
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+
+    existing = store.get_alert(alert_id)
+    if existing is None or not may_handle_alert(_resolve_caller_person_id(request), existing):
+        raise HTTPException(status_code=404, detail="Alert not found")
     if not store.set_status(alert_id, body.status):
         raise HTTPException(status_code=404, detail="Alert not found")
     updated = store.get_alert(alert_id)

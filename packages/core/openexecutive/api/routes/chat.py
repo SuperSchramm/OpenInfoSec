@@ -423,7 +423,11 @@ async def _run_chat_turn(
         # each formatter already swallows its own errors, this just guards the
         # to_thread wrappers themselves.
         results = await asyncio.gather(
-            asyncio.to_thread(format_open_alerts_for_prompt),
+            asyncio.to_thread(
+                format_open_alerts_for_prompt,
+                scope_to_caller=True,
+                caller_person_id=caller_person_id,
+            ),
             asyncio.to_thread(format_talent_for_prompt),
             asyncio.to_thread(format_onboarding_for_prompt),
             return_exceptions=True,

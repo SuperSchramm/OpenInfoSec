@@ -28,7 +28,13 @@ _BODY_SNIPPET_CHARS = 200
 _MAX_ALERTS = 30
 
 
-def format_open_alerts_for_prompt(db_path: Path | None = None, limit: int = _MAX_ALERTS) -> str:
+def format_open_alerts_for_prompt(
+    db_path: Path | None = None,
+    limit: int = _MAX_ALERTS,
+    *,
+    scope_to_caller: bool = False,
+    caller_person_id: int | None = None,
+) -> str:
     """Render current open (unread) alerts as a compact digest, or ``""`` when none.
 
     One line per alert::
@@ -39,6 +45,10 @@ def format_open_alerts_for_prompt(db_path: Path | None = None, limit: int = _MAX
     proposal build. ``category`` (``action``/``monitoring``) comes from
     :func:`openexecutive.briefing.ranking.score_and_categorize` so the Executive
     can tell an item awaiting a decision from a passive monitoring signal.
+
+    With ``scope_to_caller`` (a web chat turn), a decision proposal's alert (its
+    meeting title, times, attendees) is left out unless the caller is the
+    principal or the person it was routed to (issue #51); other alerts stay.
 
     Pure synchronous SQLite read — wrap in ``asyncio.to_thread`` at the call
     site. Never raises: any failure logs and returns ``""`` so a chat turn is
@@ -52,6 +62,11 @@ def format_open_alerts_for_prompt(db_path: Path | None = None, limit: int = _MAX
     except Exception:
         logger.exception("briefing_context.list_alerts_failed")
         return ""
+
+    if scope_to_caller:
+        from openexecutive.alerts.decision_access import may_handle_alert
+
+        alerts = [a for a in alerts if may_handle_alert(caller_person_id, a)]
 
     lines: list[str] = []
     for alert in alerts:
