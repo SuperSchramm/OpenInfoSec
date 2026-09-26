@@ -17,7 +17,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from openexecutive.memory.decision_ledger import (
@@ -119,34 +119,59 @@ async def _execute_booking(
     return await _do_create_event(gateway, final_payload)
 
 
+def _caller(request: Request) -> int | None:
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+
+    return _resolve_caller_person_id(request)
+
+
+def _visible_instance(request: Request, instance_id: int) -> DecisionInstance:
+    """The decision, or 404 unless the caller is its routed approver or the
+    principal (issue #46). A decision with no approver is the principal's alone.
+    A non-owner gets the same 404 as an unknown id, so ids can't be probed."""
+    from openexecutive.people.store import is_principal_or_self
+
+    instance = get_decision_instance(instance_id)
+    if instance is None or not is_principal_or_self(_caller(request), instance.approver_person_id):
+        raise HTTPException(status_code=404, detail="Decision instance not found")
+    return instance
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @router.get("/decisions", response_model=list[DecisionInstance])
 def get_decisions(
+    request: Request,
     decision_class: str = _CALENDAR_CLASS,
     status: str | None = None,
     limit: int = 50,
 ) -> list[DecisionInstance]:
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be 1–500")
-    return list_instances(decision_class, status=status, limit=limit)
+    from openexecutive.people.store import is_principal_or_self
+
+    caller = _caller(request)
+    if caller is not None and is_principal_or_self(caller, None):
+        return list_instances(decision_class, status=status, limit=limit)
+    if caller is None:
+        return []
+    # A non-principal sees only proposals routed to them (filtered in the query,
+    # so a busy ledger can't push their older ones out of the window).
+    return list_instances(
+        decision_class, status=status, approver_person_id=caller, limit=limit
+    )
 
 
 @router.get("/decisions/{instance_id}", response_model=DecisionInstance)
-def get_decision(instance_id: int) -> DecisionInstance:
-    instance = get_decision_instance(instance_id)
-    if instance is None:
-        raise HTTPException(status_code=404, detail="Decision instance not found")
-    return instance
+def get_decision(instance_id: int, request: Request) -> DecisionInstance:
+    return _visible_instance(request, instance_id)
 
 
 @router.post("/decisions/{instance_id}/approve", response_model=DecisionInstance)
-async def approve_decision(instance_id: int, body: ApproveBody) -> DecisionInstance:
-    instance = get_decision_instance(instance_id)
-    if instance is None:
-        raise HTTPException(status_code=404, detail="Decision instance not found")
+async def approve_decision(instance_id: int, body: ApproveBody, request: Request) -> DecisionInstance:
+    instance = _visible_instance(request, instance_id)
     if instance.status != STATUS_PROPOSED:
         raise HTTPException(
             status_code=409,
@@ -237,10 +262,8 @@ async def approve_decision(instance_id: int, body: ApproveBody) -> DecisionInsta
 
 
 @router.post("/decisions/{instance_id}/reject", response_model=DecisionInstance)
-def reject_decision(instance_id: int, body: RejectBody) -> DecisionInstance:
-    instance = get_decision_instance(instance_id)
-    if instance is None:
-        raise HTTPException(status_code=404, detail="Decision instance not found")
+def reject_decision(instance_id: int, body: RejectBody, request: Request) -> DecisionInstance:
+    instance = _visible_instance(request, instance_id)
     if instance.status != STATUS_PROPOSED:
         raise HTTPException(
             status_code=409,
@@ -255,11 +278,9 @@ def reject_decision(instance_id: int, body: RejectBody) -> DecisionInstance:
 
 
 @router.post("/decisions/{instance_id}/cancel", response_model=DecisionInstance)
-async def cancel_decision(instance_id: int) -> DecisionInstance:
+async def cancel_decision(instance_id: int, request: Request) -> DecisionInstance:
     """Cancel an approved/executed event (reverse it)."""
-    instance = get_decision_instance(instance_id)
-    if instance is None:
-        raise HTTPException(status_code=404, detail="Decision instance not found")
+    instance = _visible_instance(request, instance_id)
     if instance.status not in (
         STATUS_APPROVED_UNCHANGED, STATUS_APPROVED_WITH_EDIT, STATUS_PROPOSED,
     ):
@@ -288,9 +309,14 @@ async def cancel_decision(instance_id: int) -> DecisionInstance:
 
 @router.get("/audit/reliability", response_model=ReliabilityCard)
 def get_reliability(
+    request: Request,
     decision_class: str = _CALENDAR_CLASS,
     days: int = 30,
 ) -> ReliabilityCard:
+    from openexecutive.people.store import is_principal_or_self
+
+    if not is_principal_or_self(_caller(request), None):
+        raise HTTPException(status_code=403, detail="Reliability figures are restricted to the principal")
     if days < 1 or days > 365:
         raise HTTPException(status_code=400, detail="days must be 1–365")
     return aggregate_reliability(decision_class, window_days=days)

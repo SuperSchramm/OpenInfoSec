@@ -1504,8 +1504,15 @@ audit:
     (CLI / direct curl holding the shared secret) resolves to the principal, as in
     the chat routes; with no principal configured (fresh install before
     onboarding) the routes stay closed. POST /audit/log (how the UI server records
-    sign-ins) is not gated. The UI's Audit and Token usage pages therefore
-    only work for the principal.
+    sign-ins) is server-only (issue #45): a request carrying `x-caller-email` (every
+    proxied signed-in user; the sign-in hook sends none) gets 403, and summary (1000
+    chars), actor/session_id/turn_id (200) and details (8 KB) are size-capped (422).
+    The UI's Audit and Token usage pages therefore only work for the principal.
+    /decisions (issue #46): a decision is visible to and actionable by the principal
+    and the person it was routed to (approver_person_id); a decision with no
+    approver is the principal's alone. A non-owner gets the same 404 as an unknown
+    id on GET/approve/reject/cancel; GET /decisions lists only what the caller may
+    see; GET /audit/reliability is principal-only (403).
   table: audit_log (id, ts, event_type, session_id, turn_id, actor, summary, details_json, full_json, department)
   event_types:
     - chat_turn — one row per user-facing turn (latency, tokens, session)

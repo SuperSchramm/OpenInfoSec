@@ -10,11 +10,12 @@ re-deriving causality from event types client-side.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from openexecutive.audit import AuditLogger, get_audit_logger
 from openexecutive.audit.logger import EVENT_TYPES
@@ -192,17 +193,35 @@ def _require_principal(request: Request) -> None:
         raise HTTPException(status_code=403, detail="The audit log is restricted to the principal")
 
 
+_MAX_LOG_SUMMARY = 1000
+_MAX_LOG_ID = 200
+_MAX_LOG_DETAILS_BYTES = 8192
+
+
 class AuditLogRequest(BaseModel):
     event_type: str
-    summary: str
-    session_id: str | None = None
-    turn_id: str | None = None
-    actor: str | None = None
+    summary: str = Field(max_length=_MAX_LOG_SUMMARY)
+    session_id: str | None = Field(default=None, max_length=_MAX_LOG_ID)
+    turn_id: str | None = Field(default=None, max_length=_MAX_LOG_ID)
+    actor: str | None = Field(default=None, max_length=_MAX_LOG_ID)
     details: dict[str, Any] | None = None
+
+    @field_validator("details")
+    @classmethod
+    def _details_not_huge(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is not None and len(json.dumps(v, default=str)) > _MAX_LOG_DETAILS_BYTES:
+            raise ValueError(f"details larger than {_MAX_LOG_DETAILS_BYTES} bytes")
+        return v
 
 
 @router.post("/audit/log", status_code=201)
 def create_audit_log(body: AuditLogRequest, request: Request) -> dict[str, int | None]:
+    # Issue #45: the only legitimate writer is the UI's server-side sign-in hook,
+    # which calls the backend directly with no `x-caller-email`; the proxy stamps
+    # that header on every signed-in user's request (and strips a client-supplied
+    # one). A request carrying it is a teammate trying to plant audit rows.
+    if (request.headers.get("x-caller-email") or "").strip():
+        raise HTTPException(status_code=403, detail="Audit rows are written by the server only")
     if body.event_type not in EVENT_TYPES:
         raise HTTPException(status_code=422, detail=f"Unknown event_type: {body.event_type!r}")
     audit = _resolve_logger(request)

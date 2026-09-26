@@ -277,11 +277,15 @@ def list_instances(
     decision_class: str,
     *,
     status: str | None = None,
+    approver_person_id: int | None = None,
     limit: int = 100,
     db_path: Path | None = None,
 ) -> list[DecisionInstance]:
     sql = "SELECT * FROM decision_instances WHERE decision_class = ?"
     params: list[Any] = [decision_class]
+    if approver_person_id is not None:
+        sql += " AND approver_person_id = ?"
+        params.append(approver_person_id)
     if status is not None:
         sql += " AND status = ?"
         params.append(status)

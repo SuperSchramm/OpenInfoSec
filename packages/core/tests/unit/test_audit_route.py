@@ -339,7 +339,31 @@ def test_with_no_principal_configured_nobody_reads_the_audit_log(client: TestCli
     assert client.get("/audit/logs").status_code == 403
 
 
-def test_writing_an_audit_row_is_not_changed_by_this_fix(client: TestClient) -> None:
-    """POST /audit/log is how the UI server records sign-ins; only reads are gated here."""
-    r = client.post("/audit/log", json={"event_type": "auth_login", "summary": "sign-in"}, headers=SABIN)
+# --- POST /audit/log is server-only and bounded (issue #45) ------------------
+
+def test_signed_in_users_cannot_write_audit_rows(client: TestClient) -> None:
+    body = {"event_type": "auth_login", "summary": "fake sign-in", "actor": "alex@example.com"}
+    for h in (SABIN, STRANGER, ALEX):
+        assert client.post("/audit/log", json=body, headers=h).status_code == 403
+    assert client.get("/audit/logs", params={"event_type": "auth_login"}).json()["total"] == 0
+
+
+def test_server_side_sign_in_hook_can_still_write(client: TestClient) -> None:
+    r = client.post("/audit/log", json={"event_type": "auth_login", "summary": "sign-in"})
     assert r.status_code == 201
+    assert client.get("/audit/logs", params={"event_type": "auth_login"}).json()["total"] == 1
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"summary": "x" * 1001},
+        {"actor": "a" * 201},
+        {"session_id": "s" * 201},
+        {"turn_id": "t" * 201},
+        {"details": {"blob": "y" * 9000}},
+    ],
+)
+def test_audit_log_fields_are_bounded(client: TestClient, extra: dict) -> None:
+    body = {"event_type": "auth_login", "summary": "ok", **extra}
+    assert client.post("/audit/log", json=body).status_code == 422

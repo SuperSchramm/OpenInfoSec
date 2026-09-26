@@ -45,6 +45,24 @@ def _seed_companion_alert(db: Path, instance_id: int) -> None:
     )
 
 
+ALEX = {"x-caller-email": "alex@example.com"}  # principal
+SABIN = {"x-caller-email": "sabin@example.com"}  # rostered teammate
+STRANGER = {"x-caller-email": "stranger@example.com"}  # signed in, not rostered
+
+
+@pytest.fixture(autouse=True)
+def people(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Decisions are visible to the principal and the routed approver only
+    (issue #46). Isolated people store; no caller header resolves to the principal."""
+    from openexecutive.people import store as people_store
+
+    monkeypatch.setattr(people_store, "DB_PATH", tmp_path / "people.db")
+    people_store.initialize_db()
+    alex = people_store.upsert_person(full_name="Alex", is_principal=True, email="alex@example.com")
+    sabin = people_store.upsert_person(full_name="Sabin", email="sabin@example.com")
+    return {"alex": alex, "sabin": sabin}
+
+
 @pytest.fixture()
 def client(db: Path) -> TestClient:
     from fastapi import FastAPI
@@ -337,3 +355,84 @@ def test_approve_with_no_linked_alert_still_succeeds(client: TestClient, db: Pat
     assert res.json()["status"] == "approved_unchanged"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Access control (issue #46)
+# ---------------------------------------------------------------------------
+
+def _seed_for(db: Path, approver: int | None, idem: str) -> int:
+    import sqlite3
+
+    iid = _seed(db, idem)
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE decision_instances SET approver_person_id = ? WHERE id = ?", (approver, iid))
+    return iid
+
+
+def test_unowned_decision_is_principal_only(client: TestClient, db: Path) -> None:
+    iid = _seed_for(db, None, "a")
+    assert client.get(f"/decisions/{iid}", headers=ALEX).status_code == 200
+    assert client.get(f"/decisions/{iid}").status_code == 200  # no header: principal
+    for h in (SABIN, STRANGER):
+        assert client.get(f"/decisions/{iid}", headers=h).status_code == 404
+        assert client.post(f"/decisions/{iid}/reject", json={}, headers=h).status_code == 404
+        assert client.post(f"/decisions/{iid}/cancel", headers=h).status_code == 404
+        assert client.post(f"/decisions/{iid}/approve", json={}, headers=h).status_code == 404
+    assert client.get(f"/decisions/{iid}", headers=ALEX).json()["status"] == "proposed"
+
+
+def test_routed_approver_can_act_on_their_own(
+    client: TestClient, db: Path, people: dict[str, int]
+) -> None:
+    iid = _seed_for(db, people["sabin"], "b")
+    assert client.get(f"/decisions/{iid}", headers=SABIN).status_code == 200
+    assert client.post(f"/decisions/{iid}/reject", json={}, headers=SABIN).json()["status"] == "rejected"
+
+
+def test_teammate_cannot_touch_someone_elses_decision(
+    client: TestClient, db: Path, people: dict[str, int]
+) -> None:
+    iid = _seed_for(db, people["alex"], "c")
+    assert client.get(f"/decisions/{iid}", headers=SABIN).status_code == 404
+    assert client.post(f"/decisions/{iid}/reject", json={}, headers=SABIN).status_code == 404
+    assert client.get(f"/decisions/{iid}", headers=ALEX).json()["status"] == "proposed"
+
+
+def test_unknown_id_and_forbidden_id_look_the_same(client: TestClient, db: Path) -> None:
+    iid = _seed_for(db, None, "d")
+    a = client.get(f"/decisions/{iid}", headers=SABIN)
+    b = client.get("/decisions/99999", headers=SABIN)
+    assert (a.status_code, a.json()) == (b.status_code, b.json())
+
+
+def test_list_is_filtered_to_what_the_caller_may_see(
+    client: TestClient, db: Path, people: dict[str, int]
+) -> None:
+    mine = _seed_for(db, people["sabin"], "m")
+    other = _seed_for(db, None, "o")
+    assert {d["id"] for d in client.get("/decisions", headers=ALEX).json()} == {mine, other}
+    assert {d["id"] for d in client.get("/decisions", headers=SABIN).json()} == {mine}
+    assert client.get("/decisions", headers=STRANGER).json() == []
+
+
+def test_reliability_is_principal_only(client: TestClient) -> None:
+    assert client.get("/audit/reliability", headers=ALEX).status_code == 200
+    assert client.get("/audit/reliability").status_code == 200
+    for h in (SABIN, STRANGER):
+        assert client.get("/audit/reliability", headers=h).status_code == 403
+    assert client.get("/audit/reliability", params={"days": 0}, headers=SABIN).status_code == 403
+
+
+def test_older_routed_decision_is_not_pushed_out_by_a_busy_ledger(
+    client: TestClient, db: Path, people: dict[str, int]
+) -> None:
+    mine = _seed_for(db, people["sabin"], "old")
+    for n in range(3):
+        _seed_for(db, None, f"noise{n}")
+    import sqlite3
+
+    with sqlite3.connect(db) as c:  # make Sabin's the oldest row
+        c.execute("UPDATE decision_instances SET created_at = '2000-01-01' WHERE id = ?", (mine,))
+    got = client.get("/decisions", params={"limit": 1}, headers=SABIN).json()
+    assert [d["id"] for d in got] == [mine]
