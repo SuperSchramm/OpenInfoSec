@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from openexecutive.departments import registry, store
@@ -154,13 +154,19 @@ def delete_department(slug: str) -> Response:
 
 
 @router.patch("/departments/{slug}", response_model=DepartmentState)
-def patch_department(slug: str, patch: DepartmentPatch) -> DepartmentState:
+def patch_department(slug: str, patch: DepartmentPatch, request: Request) -> DepartmentState:
     if store.get_department(slug) is None:
         raise HTTPException(status_code=404, detail="Unknown department")
 
     raw = patch.model_dump(exclude_unset=True)
     if not raw:
         return _must_get(slug)
+    if "head_person_id" in raw:
+        # A department head gets approval routing and a head persona: the owner's
+        # call, the same as the Executive's set_department_head tool.
+        from openexecutive.api.routes.chat import require_install_owner
+
+        require_install_owner(request, "set a department head")
 
     store.update_department(
         slug,

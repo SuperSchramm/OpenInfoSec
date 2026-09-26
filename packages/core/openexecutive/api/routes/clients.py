@@ -14,6 +14,8 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from openexecutive.api.routes.chat import require_install_owner
+
 router = APIRouter()
 
 # Intake attachments accepted alongside pasted notes on POST /clients/generate.
@@ -96,7 +98,8 @@ async def list_clients() -> dict:
 
 
 @router.post("/clients")
-async def create_client(req: CreateClientRequest) -> dict:
+async def create_client(req: CreateClientRequest, request: Request) -> dict:
+    require_install_owner(request, "switch the company data (client slots)")
     from openexecutive.clients.slots import ClientSlotError, create_client_slot
     from openexecutive.config import get_settings
 
@@ -186,6 +189,7 @@ async def _gather_intake_attachments(
 
 @router.post("/clients/generate")
 async def generate_client(
+    request: Request,
     description: str = Form(""),
     files: list[UploadFile] = File(  # noqa: B008 — FastAPI multipart marker, mirrors chat.py
         default=[]
@@ -201,6 +205,7 @@ async def generate_client(
     activation. Nothing is persisted here — the UI posts the (possibly edited)
     bundle back to ``POST /clients`` with ``source="generated"``.
     """
+    require_install_owner(request, "switch the company data (client slots)")
     from openexecutive.clients.slots import derive_client_slug
     from openexecutive.config import get_settings
     from openexecutive.fixtures.generator import (
@@ -258,8 +263,9 @@ async def generate_client(
 
 
 @router.post("/clients/save")
-async def save_client() -> dict:
+async def save_client(request: Request) -> dict:
     """Checkpoint the active client's live state into its slot."""
+    require_install_owner(request, "switch the company data (client slots)")
     from openexecutive.clients.slots import ClientSlotError, save_active_client
     from openexecutive.config import get_settings
 
@@ -273,6 +279,7 @@ async def save_client() -> dict:
 @router.post("/clients/{slug}/activate")
 async def activate_client(slug: str, request: Request) -> dict:
     """Switch the live company context to this client (saving the current one)."""
+    require_install_owner(request, "switch the company data (client slots)")
     from openexecutive.clients.slots import ClientSlotError, activate_client_slot
     from openexecutive.config import get_settings
 
@@ -305,8 +312,9 @@ async def clients_cockpit() -> dict:
 
 
 @router.patch("/clients/{slug}")
-async def patch_client_meta(slug: str, req: ClientMetaPatch) -> dict:
+async def patch_client_meta(slug: str, req: ClientMetaPatch, request: Request) -> dict:
     """Update a slot's engagement metadata (role, status, renewal, …)."""
+    require_install_owner(request, "switch the company data (client slots)")
     from openexecutive.clients.slots import ClientSlotError, update_client_meta
     from openexecutive.config import get_settings
 
@@ -321,7 +329,8 @@ async def patch_client_meta(slug: str, req: ClientMetaPatch) -> dict:
 
 
 @router.delete("/clients/{slug}")
-async def delete_client(slug: str) -> dict:
+async def delete_client(slug: str, request: Request) -> dict:
+    require_install_owner(request, "switch the company data (client slots)")
     from openexecutive.clients.slots import ClientSlotError, delete_client_slot
     from openexecutive.config import get_settings
 

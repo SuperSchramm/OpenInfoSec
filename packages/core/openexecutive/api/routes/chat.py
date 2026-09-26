@@ -17,6 +17,7 @@ from openexecutive.api.models import ChatRequest, PageContext
 from openexecutive.audit import log_event as audit_log
 from openexecutive.integrations.attachments import build_attachment_output
 from openexecutive.orchestrator.debug_events import DebugCollector
+from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
 
 # Per-file size cap. Mirrors `_DEFAULT_MAX_BYTES` in
 # `openexecutive/integrations/attachments.py` so the web chat behaves the same
@@ -285,6 +286,35 @@ def _should_bind_owner(request: Request, requested_id: str | None, caller_person
     return _is_session_starter(request, requested_id, caller_person_id)
 
 
+def _caller_is_principal_or_unclaimed(request: Request) -> bool:
+    """Whether the caller may make a roster change: the caller resolves to the
+    principal (a request with no `x-caller-email` does, see
+    `_resolve_caller_person_id`), or no principal is on the roster yet, so a
+    first-run install can add its owner and is never locked out. Fails closed:
+    if the roster cannot be read, the answer is no."""
+    from openexecutive.people import store as people_store
+
+    try:
+        if people_store.find_principal_person() is None:
+            return True
+        return people_store.is_principal_or_self(_resolve_caller_person_id(request), None)
+    except Exception:
+        logger.exception("principal check failed -- refusing the principal-only change")
+        return False
+
+
+def require_install_owner(request: Request, action: str) -> None:
+    """403 unless the caller is the principal, or no principal exists yet (issue #47).
+
+    For install-wide changes that are the owner's call: the People list, and every
+    route that swaps or wipes the company's data (fixtures, client slots). Those
+    last ones matter for the People list too: a reset or a blank client empties the
+    roster, and with no principal an install counts as unclaimed, so an ungated
+    swap would let a teammate wipe the roster and then add themselves as principal."""
+    if not _caller_is_principal_or_unclaimed(request):
+        raise HTTPException(status_code=403, detail=f"Only the principal can {action}")
+
+
 async def _run_chat_turn(
     *,
     message: str,
@@ -469,6 +499,11 @@ async def _run_chat_turn(
             save_message,
             update_session_timestamp,
         )
+
+        # Record who is asking for the Executive's roster tools (see
+        # orchestrator.turn_identity). The web chat is a verified surface: the UI
+        # proxy stamps `x-caller-email` from the signed-in session.
+        current_turn_caller.set(TurnCaller(person_id=caller_person_id, from_web_chat=True))
 
         full_response = ""
         chunk_count = 0

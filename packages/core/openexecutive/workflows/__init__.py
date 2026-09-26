@@ -54,6 +54,14 @@ from openexecutive.workflows.reference_check import ReferenceCheckWorkflow
 from openexecutive.workflows.risk_register import RiskRegisterWorkflow
 from openexecutive.workflows.role_onboarding import RoleOnboardingWorkflow
 
+# Workflows that create or change People rows. A People row is the web sign-in
+# allow-list, the outbound-email allow-list and approval routing, so only the
+# owner (the principal) may start these (`api.routes.chat.require_install_owner`
+# on the HTTP route, `people_tools._refuse_unless_owner` on the chat tools).
+# Add a workflow here if it writes the roster.
+ROSTER_WRITING_WORKFLOWS: frozenset[str] = frozenset({"new_hire_onboarding"})
+
+
 WORKFLOW_REGISTRY: dict[str, Workflow] = {
     "annual_plan": AnnualPlanWorkflow(),
     "department_check_in": DepartmentCheckInWorkflow(),

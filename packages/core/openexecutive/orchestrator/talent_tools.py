@@ -644,7 +644,7 @@ async def handle_set_candidate_stage(tool_input: dict[str, Any]) -> str:
 async def handle_start_talent_workflow(tool_input: dict[str, Any]) -> str:
     from datetime import UTC, datetime, timedelta
 
-    from openexecutive.workflows import WORKFLOW_REGISTRY
+    from openexecutive.workflows import ROSTER_WRITING_WORKFLOWS, WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import (
         complete_run,
         create_run,
@@ -659,6 +659,13 @@ async def handle_start_talent_workflow(tool_input: dict[str, Any]) -> str:
             "start_talent_workflow",
             f"workflow must be one of {_TALENT_WORKFLOWS}, got {name!r}",
         )
+
+    if name in ROSTER_WRITING_WORKFLOWS:
+        # Writes People rows: the owner's call, on a surface that verified them.
+        from openexecutive.orchestrator.people_tools import _refuse_unless_owner
+
+        if (refusal := _refuse_unless_owner("start_talent_workflow")) is not None:
+            return refusal
 
     raw_inputs = tool_input.get("inputs")
     if not isinstance(raw_inputs, dict):

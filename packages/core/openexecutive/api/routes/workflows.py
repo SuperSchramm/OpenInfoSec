@@ -21,7 +21,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
+from openexecutive.api.routes.chat import require_install_owner
 from openexecutive.workflows import (
+    ROSTER_WRITING_WORKFLOWS,
     get_workflow,
     list_workflows,
 )
@@ -193,6 +195,9 @@ async def start_workflow_run(name: str, request: Request) -> StreamingResponse:
     Each SSE event is a JSON-encoded `WorkflowEvent`. The final event in
     a successful run is `{"type": "done", "run_id": "..."}`.
     """
+    if name in ROSTER_WRITING_WORKFLOWS:
+        # Before anything else: it writes People rows (sign-in, email, approvals).
+        require_install_owner(request, "run a workflow that changes the People list")
     try:
         workflow = get_workflow(name)
     except KeyError as e:

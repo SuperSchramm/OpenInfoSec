@@ -15,6 +15,7 @@ from openexecutive.agents import overrides as agent_overrides
 from openexecutive.departments import registry as dept_registry
 from openexecutive.departments import store as dept_store
 from openexecutive.memory import episodic as episodic_module
+from openexecutive.orchestrator import people_tools
 from openexecutive.orchestrator.people_tools import (
     handle_archive_person,
     handle_list_people,
@@ -41,6 +42,14 @@ def shared_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     people_registry.invalidate()
     dept_registry.invalidate()
     return db_path
+
+
+@pytest.fixture(autouse=True)
+def _owner_is_speaking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about what the tools DO. Who may call them (the principal,
+    on the signed-in web chat, and nobody else) is tested in
+    test_roster_owner_only.py against the real gate."""
+    monkeypatch.setattr(people_tools, "_refuse_unless_owner", lambda _tool: None)
 
 
 def _call(coro_fn, payload: dict) -> dict:

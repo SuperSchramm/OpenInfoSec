@@ -238,6 +238,64 @@ def _audit(tool: str, kind: str, ok: bool, summary: str, details: dict[str, Any]
     )
 
 
+def _roster_refusal_reason(caller: Any) -> str | None:
+    """None when this turn may change the roster, else what to tell the asker.
+
+    Only the principal, and only on a surface that verified who is speaking (the
+    signed-in web chat). Anything else -- an inbound email, a Google Chat message,
+    a Slack/Discord/Telegram message (not yet wired to record the verified
+    speaker), a teammate, the CLI, the scheduler or a workflow -- is refused, so
+    the owner makes the change from the People page or the web chat."""
+    from openexecutive.people.store import is_principal_or_self
+
+    if caller is None or not getattr(caller, "from_web_chat", False):
+        return (
+            "Only the company's owner can change the People list, and this request "
+            "did not come from somewhere I can confirm it is them. Tell whoever "
+            "asked that the owner needs to make this change from the web app."
+        )
+    try:
+        if is_principal_or_self(getattr(caller, "person_id", None), None):
+            return None
+    except Exception:
+        logger.exception("people_tools: principal lookup failed -- refusing roster write")
+    if getattr(caller, "person_id", None) is None:
+        return (
+            "Only the company's owner can change the People list, and this signed-in "
+            "email is not on anyone's People entry, so I cannot confirm it is the owner."
+        )
+    return (
+        "Only the company's owner can add, change or remove people or set department "
+        "heads, and this request came from someone else. Tell them the owner needs "
+        "to make this change."
+    )
+
+
+def _refuse_unless_owner(tool: str) -> str | None:
+    """The refusal tool result when this turn may not change the roster, else None.
+
+    A People row decides who may sign in to the web app, who the Executive may
+    email and who approves what, and these tools are offered on every turn,
+    including one an inbound email or a teammate started. Fails closed: with no
+    recorded caller (``orchestrator.turn_identity``) the answer is no."""
+    from openexecutive.orchestrator.turn_identity import current_turn_caller
+
+    caller = current_turn_caller.get()
+    reason = _roster_refusal_reason(caller)
+    if reason is None:
+        return None
+    _audit(
+        tool, "write", False,
+        f"{tool} refused: not the principal on a verified surface",
+        {
+            "refused": True,
+            "caller_person_id": getattr(caller, "person_id", None),
+            "from_web_chat": bool(getattr(caller, "from_web_chat", False)),
+        },
+    )
+    return json.dumps({"status": "refused", "detail": reason})
+
+
 async def handle_list_people(tool_input: dict[str, Any]) -> str:
     from openexecutive.people import store as people_store
 
@@ -272,6 +330,9 @@ async def handle_list_people(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_upsert_person(tool_input: dict[str, Any]) -> str:
+    if (refusal := _refuse_unless_owner("upsert_person")) is not None:
+        return refusal
+
     from openexecutive.people import registry as people_registry
     from openexecutive.people import store as people_store
     from openexecutive.people.models import AuthorityScope
@@ -402,6 +463,9 @@ async def handle_upsert_person(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_archive_person(tool_input: dict[str, Any]) -> str:
+    if (refusal := _refuse_unless_owner("archive_person")) is not None:
+        return refusal
+
     from openexecutive.people import registry as people_registry
     from openexecutive.people import store as people_store
 
@@ -440,6 +504,9 @@ async def handle_archive_person(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_set_department_head(tool_input: dict[str, Any]) -> str:
+    if (refusal := _refuse_unless_owner("set_department_head")) is not None:
+        return refusal
+
     from openexecutive.departments import registry as dept_registry
     from openexecutive.departments import store as dept_store
     from openexecutive.departments.head_persona import ensure_head_persona_override

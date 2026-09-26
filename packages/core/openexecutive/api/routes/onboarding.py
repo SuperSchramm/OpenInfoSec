@@ -4,9 +4,10 @@ import asyncio
 import logging
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from openexecutive.api.models import OnboardAnswerRequest, OnboardStatusResponse
+from openexecutive.api.routes.chat import require_install_owner
 from openexecutive.onboarding.wizard import (
     TOTAL_STEPS,
     WizardState,
@@ -55,7 +56,12 @@ async def start_onboarding() -> OnboardStatusResponse:
 
 
 @router.post("/onboard/answer", response_model=OnboardStatusResponse)
-async def submit_answer(body: OnboardAnswerRequest) -> OnboardStatusResponse:
+async def submit_answer(body: OnboardAnswerRequest, request: Request) -> OnboardStatusResponse:
+    # Completing the wizard creates People rows (with emails, i.e. sign-in access)
+    # and a second principal row, and overwrites the company profile: the owner's
+    # call once there is one. On a fresh install (no principal yet) anyone may,
+    # so first setup still works.
+    require_install_owner(request, "run the setup wizard")
     state = _wizard_sessions.get(body.session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Onboarding session not found")

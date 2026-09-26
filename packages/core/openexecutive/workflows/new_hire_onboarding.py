@@ -260,9 +260,20 @@ def _upsert_hire_person(ctx: ReminderContext) -> tuple[int, bool]:
     if candidate.email:
         existing = find_person_by_email(candidate.email)
     if existing is None:
+        # By name only ever matches an ordinary person: a principal's row is never
+        # adopted just because a candidate shares its name (that would let the
+        # candidate's email land on the owner's entry and take over sign-in).
         existing = next(
-            (p for p in list_people() if p.full_name == candidate.full_name), None
+            (
+                p
+                for p in list_people()
+                if p.full_name == candidate.full_name and not p.is_principal
+            ),
+            None,
         )
+    if existing is not None and existing.is_principal and existing.id is not None:
+        # Onboarding never edits the owner's row (role, departments, email).
+        return existing.id, False
 
     dept_slugs = _resolvable_department_slugs(ctx.engagement)
     if existing is not None and existing.id is not None:

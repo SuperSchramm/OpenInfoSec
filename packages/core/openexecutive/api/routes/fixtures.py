@@ -5,6 +5,8 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from openexecutive.api.routes.chat import require_install_owner
+
 router = APIRouter()
 
 _SAFE_NAME = re.compile(r"^[a-z0-9_-]+$")
@@ -54,6 +56,7 @@ async def fixtures_snapshot(request: Request) -> dict:
     fixture data, not the user's company, and overwriting the only backup
     with fixture data would be irreversible data loss.
     """
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.cli.fixture_loader import (
         FixtureActiveError,
         snapshot_user_state_async,
@@ -78,6 +81,7 @@ async def fixtures_reset(request: Request) -> dict:
     hit the deleted-then-recreated collection through the previous
     store instance.
     """
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.cli.fixture_loader import reset_all_state
     from openexecutive.config import get_settings
 
@@ -88,6 +92,7 @@ async def fixtures_reset(request: Request) -> dict:
 @router.post("/fixtures/unload")
 async def fixtures_unload(request: Request) -> dict:
     """Restore the user's original state from the backup directory."""
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.cli.fixture_loader import (
         FixtureNotFoundError,
         unload_fixture,
@@ -107,6 +112,7 @@ async def fixtures_unload(request: Request) -> dict:
 
 @router.post("/fixtures/{name}/load")
 async def load_fixture(name: str, request: Request) -> dict:
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.cli.fixture_loader import (
         FixtureNotFoundError,
         load_fixture_any,
@@ -130,13 +136,14 @@ async def load_fixture(name: str, request: Request) -> dict:
 
 
 @router.post("/fixtures/generate")
-async def generate_fixture(req: GenerateFixtureRequest) -> dict:
+async def generate_fixture(req: GenerateFixtureRequest, request: Request) -> dict:
     """Generate a DRAFT fixture bundle from a scenario description.
 
     The bundle is validated but NOT persisted — the UI shows it for review and
     posts it back to ``POST /fixtures`` to save. Returns the bundle plus a
     suggested unique slug.
     """
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.config import get_settings
     from openexecutive.fixtures.generator import (
         GenerationError,
@@ -163,8 +170,9 @@ async def generate_fixture(req: GenerateFixtureRequest) -> dict:
 
 
 @router.post("/fixtures")
-async def create_fixture(req: CreateFixtureRequest) -> dict:
+async def create_fixture(req: CreateFixtureRequest, request: Request) -> dict:
     """Validate a (reviewed) bundle and persist it as a generated fixture."""
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.fixtures import store as fixtures_store
     from openexecutive.fixtures.generator import (
         FixtureBundle,
@@ -203,8 +211,9 @@ async def create_fixture(req: CreateFixtureRequest) -> dict:
 
 
 @router.delete("/fixtures/{name}")
-async def delete_fixture(name: str) -> dict:
+async def delete_fixture(name: str, request: Request) -> dict:
     """Soft-delete a GENERATED fixture. Refuses curated and active fixtures."""
+    require_install_owner(request, "switch the company data (fixtures)")
     from openexecutive.cli.fixture_loader import FIXTURES_ROOT, get_fixture_status
     from openexecutive.config import get_settings
     from openexecutive.fixtures import store as fixtures_store

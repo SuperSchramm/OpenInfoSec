@@ -1216,6 +1216,53 @@ people:
   module: openexecutive.people
   store: openexecutive.people.store (SQLite)
   models: openexecutive.people.models — Person (name, role, department, principal flag, contact channels, availability windows, on-leave date)
+  roster_access: |
+    The People list is also the web sign-in allow-list, the outbound-email
+    allow-list and approval routing, so changing it is the principal's alone
+    (issue: any signed-in teammate could otherwise put their own email on the
+    owner's row, add a second principal or archive the owner). POST /people,
+    PATCH /people/{id} and POST /people/{id}/archive call
+    `people._require_roster_owner` -> `chat._caller_is_principal_or_unclaimed`:
+    the caller must resolve to the principal (a request with no `x-caller-email`
+    does), or no principal exists yet so first setup can add its owner; it fails
+    closed if the roster cannot be read; anyone else gets 403 "Only the principal
+    can change the People list", before the id lookup so a refusal cannot probe
+    which ids exist. Nobody edits their own row (its email and chat ids are how
+    they sign in and are reached). Reads stay open to signed-in users. The
+    Executive's roster tools (`upsert_person`, `archive_person`,
+    `set_department_head`) are gated too (`people_tools._refuse_unless_owner`):
+    only the principal, and only on a surface that verified who is speaking. The
+    web chat records the verified speaker per request in
+    `orchestrator.turn_identity.current_turn_caller` (a context variable, not a
+    field of the shared `Session`); channel adapters, the scheduler, workflows,
+    the CLI and the MCP server never record one, so they fail closed (Slack and
+    Discord are not yet wired to record their verified speaker: the owner makes
+    roster changes from the People page or the web chat).
+    The routes that wipe or swap the company's data are the owner's call too, via
+    `chat.require_install_owner` (principal, or no principal yet): every write on
+    /fixtures (snapshot, reset, unload, load, generate, create, delete) and
+    /clients (create, generate, save, activate, patch, delete), and the
+    `head_person_id` field of PATCH /departments/{slug} (the HTTP twin of the
+    set_department_head tool). Without this the People gate is walkable: a reset
+    or a blank client empties the roster, an install with no principal counts as
+    unclaimed, and a teammate could then add themselves as principal. Reads of
+    /fixtures and /clients stay open to signed-in users. Two more writers of
+    People rows are gated the same way. Workflows listed in
+    `workflows.ROSTER_WRITING_WORKFLOWS` (today `new_hire_onboarding`, which
+    creates or updates a Person from a placed candidate) can only be started by the
+    owner: on POST /workflows/{name}/runs (before the body is read) and through the
+    Executive's `start_talent_workflow` and `run_workflow` tools; add a workflow to
+    that set if it writes the roster. And POST /onboard/answer, which completes the
+    setup wizard (People rows with emails, a second principal row, the company
+    profile), needs the owner once a principal exists; a fresh install can still
+    run it. As defence in depth the new-hire workflow's person matching also never
+    edits a principal's row: by name it only matches ordinary people, and a match
+    on the principal (by email) is returned untouched, so a candidate who shares
+    the owner's name cannot get their email onto the owner's entry. Known
+    remaining gap: the talent routes (POST /engagements, /candidates, ...) are
+    still open to signed-in users; they hold hiring data, not the roster. Two
+    principal rows are possible (the index is not UNIQUE). Ported from upstream
+    SenteLabsAI/OpenExecutive 9325113, adapted to this codebase.
   registry: openexecutive.people.registry — in-memory cache + lookup
   channel: |
     openexecutive.people.channel — resolves a person to a deliverable

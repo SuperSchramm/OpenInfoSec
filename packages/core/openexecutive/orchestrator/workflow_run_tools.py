@@ -185,7 +185,7 @@ async def handle_list_workflows(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
-    from openexecutive.workflows import get_workflow
+    from openexecutive.workflows import ROSTER_WRITING_WORKFLOWS, get_workflow
     from openexecutive.workflows.persistence import (
         complete_run,
         create_run,
@@ -212,6 +212,13 @@ async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
             f"unknown workflow: {name!r}. Call list_workflows to see what's available.",
             kind="write",
         )
+
+    if name in ROSTER_WRITING_WORKFLOWS:
+        # Writes People rows: the owner's call, on a surface that verified them.
+        from openexecutive.orchestrator.people_tools import _refuse_unless_owner
+
+        if (refusal := _refuse_unless_owner("run_workflow")) is not None:
+            return refusal
 
     raw_inputs = tool_input.get("inputs")
     if raw_inputs is None:
