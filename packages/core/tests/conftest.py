@@ -83,3 +83,22 @@ def isolate_builtin_overlay(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: p
     """
     monkeypatch.setenv("BUILTIN_OVERLAY_PATH", str(tmp_path_factory.mktemp("builtin_overlay")))
     yield
+
+
+@pytest.fixture(autouse=True)
+def isolate_real_data_paths(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory):
+    """Pin the vector store and company folder to a per-test temp dir (issue #49).
+
+    ``vector_store_path`` and ``company_profile_path`` default to the repo's real
+    ``chroma_db/`` and ``company/``, and everything the fixture/client routes,
+    the ``_user_backup`` snapshot and the Honcho workspace file touch hangs off
+    them. A test that did not override both used to open the developer's real
+    data on every run (and a broken access gate let a destructive route wipe it).
+    Tests that need a specific location still set the variable themselves; their
+    ``monkeypatch.setenv`` runs after this fixture and wins.
+    """
+    root = tmp_path_factory.mktemp("real_data_guard")
+    (root / "company").mkdir()
+    monkeypatch.setenv("VECTOR_STORE_PATH", str(root / "chroma_db"))
+    monkeypatch.setenv("COMPANY_PROFILE_PATH", str(root / "company" / "profile.yaml"))
+    yield
