@@ -310,8 +310,22 @@ def require_install_owner(request: Request, action: str) -> None:
     route that swaps or wipes the company's data (fixtures, client slots). Those
     last ones matter for the People list too: a reset or a blank client empties the
     roster, and with no principal an install counts as unclaimed, so an ungated
-    swap would let a teammate wipe the roster and then add themselves as principal."""
+    swap would let a teammate wipe the roster and then add themselves as principal.
+
+    Audits every refusal (issue #50): the Executive's roster-tool refusals were
+    already audited, but the HTTP 403 from this shared gate was not."""
     if not _caller_is_principal_or_unclaimed(request):
+        audit_log(
+            "tool_invocation",
+            f"{request.method} {request.url.path}: refused ({action}) -- not the principal",
+            actor="api",
+            details={
+                "route": request.url.path,
+                "action": action,
+                "ok": False,
+                "caller_person_id": _resolve_caller_person_id(request),
+            },
+        )
         raise HTTPException(status_code=403, detail=f"Only the principal can {action}")
 
 
@@ -523,8 +537,15 @@ async def _run_chat_turn(
 
         # Record who is asking for the Executive's roster tools (see
         # orchestrator.turn_identity). The web chat is a verified surface: the UI
-        # proxy stamps `x-caller-email` from the signed-in session.
-        current_turn_caller.set(TurnCaller(person_id=caller_person_id, from_web_chat=True))
+        # proxy stamps `x-caller-email` from the signed-in session. Reset in the
+        # `finally` below (issue #50) rather than relying on the request's task
+        # ending: nothing today runs after this generator in the same task/
+        # context (no `background=` on the StreamingResponse, no spawned task),
+        # but resetting explicitly means that stays true if one is ever added,
+        # instead of silently inheriting this turn's caller.
+        turn_caller_token = current_turn_caller.set(
+            TurnCaller(person_id=caller_person_id, from_web_chat=True)
+        )
 
         full_response = ""
         chunk_count = 0
@@ -743,6 +764,8 @@ async def _run_chat_turn(
             yield f"data: {error}\n\n"
             done = json.dumps({"type": "done", "session_id": session.session_id})
             yield f"data: {done}\n\n"
+        finally:
+            current_turn_caller.reset(turn_caller_token)
 
     return StreamingResponse(
         event_generator(),

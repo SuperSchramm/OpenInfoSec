@@ -863,6 +863,17 @@ async def handle_create_candidate(tool_input: dict[str, Any]) -> str:
     notes = str(tool_input.get("notes", "") or "")
     email = _norm("email")
     linkedin_url = _norm("linkedin_url")
+
+    if email:
+        # A candidate's email can become sign-in access (once the owner runs
+        # new_hire_onboarding), so only the owner may set it here too -- the same
+        # rule POST /candidates enforces (issue #50). Found by review: this tool
+        # was the one way around that HTTP-only gate.
+        from openexecutive.orchestrator.people_tools import _refuse_unless_owner
+
+        if (refusal := _refuse_unless_owner("create_candidate")) is not None:
+            return refusal
+
     length_err = _length_error("create_candidate", [
         ("full_name", full_name, _MAX_SHORT),
         ("current_title", current_title, _MAX_SHORT),

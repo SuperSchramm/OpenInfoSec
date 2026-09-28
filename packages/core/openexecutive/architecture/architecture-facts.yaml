@@ -1264,11 +1264,39 @@ people:
     run it. As defence in depth the new-hire workflow's person matching also never
     edits a principal's row: by name it only matches ordinary people, and a match
     on the principal (by email) is returned untouched, so a candidate who shares
-    the owner's name cannot get their email onto the owner's entry. Known
-    remaining gap: the talent routes (POST /engagements, /candidates, ...) are
-    still open to signed-in users; they hold hiring data, not the roster. Two
-    principal rows are possible (the index is not UNIQUE). Ported from upstream
-    SenteLabsAI/OpenExecutive 9325113, adapted to this codebase.
+    the owner's name cannot get their email onto the owner's entry. Ported from
+    upstream SenteLabsAI/OpenExecutive 9325113, adapted to this codebase.
+
+    Talent (issue #50): the talent routes (POST /engagements, /candidates, ...)
+    stay open to signed-in users for ordinary hiring data, but a candidate's
+    `email` is the one field that can turn into sign-in access (once the owner
+    runs `new_hire_onboarding`), so setting or changing it on POST /candidates or
+    PATCH /candidates/{id} is owner-only too (`_require_owner_for_email`, same
+    `require_install_owner` gate) -- everyone else gets 403 with no other field
+    touched. Not yet gated: an unrestricted candidate/engagement email is still
+    readable by any signed-in user (not just its write), and offers.
+
+    Two principal rows are still possible in the schema (`idx_people_principal`
+    is not UNIQUE, and this codebase does not add a migration for existing
+    installs), but `upsert_person` now refuses to INSERT a second row with
+    `is_principal=True` while one is already active (`archived=0`) -- the only
+    place the flag is set (PersonPatch has no such field; the roster chat tool
+    refuses it outright). 409 on POST /people, and the Executive's `upsert_person`
+    tool already could not reach this path. Deliberately NOT blocked: archiving
+    the sole active principal, which is the existing (if narrow) way an owner
+    hands off -- archive self, then whoever claims the now-unclaimed install next
+    becomes the new principal. Blocking that would remove the only handoff path
+    without adding a replacement, so it stays a known gap (tracked, not silently
+    dropped).
+
+    Recovering fixture/CLI access (issue #50): after the owner loads a fixture,
+    the owner's own signed-in email usually does not match the fixture's
+    principal record, so PATCH/POST /people, /fixtures and /clients writes 403
+    through the UI even for the real owner. Recovery: call the same route with NO
+    `x-caller-email` header (a direct curl or the CLI, holding only the shared
+    secret) -- `_resolve_caller_person_id` falls back to the principal for a
+    headerless request, the same fallback the CLI and scheduler rely on
+    everywhere else in this file.
   registry: openexecutive.people.registry — in-memory cache + lookup
   channel: |
     openexecutive.people.channel — resolves a person to a deliverable

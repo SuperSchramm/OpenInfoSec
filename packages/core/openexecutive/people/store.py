@@ -250,6 +250,28 @@ def upsert_person(
                 ),
             )
             return person_id
+        if is_principal:
+            # BEGIN IMMEDIATE acquires SQLite's write lock before the check below,
+            # so two concurrent inserts can't both see "no active principal" and
+            # both succeed (found by review: a plain SELECT isn't inside a
+            # transaction, so two connections could otherwise race here). Only
+            # needed on this path -- ordinary inserts don't need the lock this
+            # early, and Python's sqlite3 module already opens one itself before
+            # the INSERT below.
+            conn.execute("BEGIN IMMEDIATE")
+        if is_principal and conn.execute(
+            "SELECT 1 FROM people WHERE is_principal = 1 AND archived = 0 LIMIT 1"
+        ).fetchone() is not None:
+            # At most one active principal (issue #50): `is_principal` can only be
+            # set here, at creation (PersonPatch has no such field, and the
+            # Executive's upsert_person tool refuses to touch it), so this is the
+            # one place a second one could appear. Archiving the current principal
+            # first (which makes the install briefly unclaimed) is the existing,
+            # if narrow, way to hand off ownership -- unaffected by this check.
+            raise ValueError(
+                "A principal already exists. Archive or replace the current one "
+                "before adding another."
+            )
         cursor = conn.execute(
             """
             INSERT INTO people

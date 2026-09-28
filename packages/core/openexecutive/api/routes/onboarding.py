@@ -37,10 +37,28 @@ _RESEARCH_WALLCLOCK_TIMEOUT_SECONDS = 600
 
 
 @router.get("/onboard/start", response_model=OnboardStatusResponse)
-async def start_onboarding() -> OnboardStatusResponse:
+async def start_onboarding(request: Request) -> OnboardStatusResponse:
     session_id = str(uuid.uuid4())
     state = WizardState()
     _wizard_sessions[session_id] = state
+
+    # Not gated -- a fresh install has no principal yet to gate against, and the
+    # wizard writes nothing until POST /onboard/answer (which is gated). Audited
+    # for visibility only (issue #50): who started the setup flow, and when.
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+    from openexecutive.audit import log_event as audit_log
+
+    audit_log(
+        "tool_invocation",
+        "GET /onboard/start: setup wizard started",
+        actor="api",
+        details={
+            "route": "/onboard/start",
+            "ok": True,
+            "wizard_session_id": session_id,
+            "caller_person_id": _resolve_caller_person_id(request),
+        },
+    )
 
     question = get_current_question(state)
     progress = state.get_progress()

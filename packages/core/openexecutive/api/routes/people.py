@@ -122,20 +122,23 @@ def _require_roster_owner(request: Request) -> None:
 @router.post("/people", response_model=Person, status_code=status.HTTP_201_CREATED)
 def create_person(body: PersonCreate, request: Request) -> Person:
     _require_roster_owner(request)
-    pid = people_store.upsert_person(
-        full_name=body.full_name,
-        role=body.role,
-        is_principal=body.is_principal,
-        department_slugs=body.department_slugs,
-        email=body.email,
-        slack_user_id=body.slack_user_id,
-        telegram_chat_id=body.telegram_chat_id,
-        discord_user_id=body.discord_user_id,
-        preferred_channel=body.preferred_channel,  # type: ignore[arg-type]
-        response_sla_hours=body.response_sla_hours,
-        on_leave_until=body.on_leave_until,
-        reports_to_person_id=body.reports_to_person_id,
-    )
+    try:
+        pid = people_store.upsert_person(
+            full_name=body.full_name,
+            role=body.role,
+            is_principal=body.is_principal,
+            department_slugs=body.department_slugs,
+            email=body.email,
+            slack_user_id=body.slack_user_id,
+            telegram_chat_id=body.telegram_chat_id,
+            discord_user_id=body.discord_user_id,
+            preferred_channel=body.preferred_channel,  # type: ignore[arg-type]
+            response_sla_hours=body.response_sla_hours,
+            on_leave_until=body.on_leave_until,
+            reports_to_person_id=body.reports_to_person_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if body.authority_scope:
         people_store.set_authority_scope(pid, body.authority_scope)
     if body.availability:

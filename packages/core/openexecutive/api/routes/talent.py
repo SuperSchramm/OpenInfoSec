@@ -42,6 +42,21 @@ def _get_store(request: Request):  # type: ignore[return]
 
     return ChromaDBStore(persist_directory=get_settings().vector_store_path)
 
+
+def _require_owner_for_email(request: Request) -> None:
+    """403 unless the caller is the principal, or no principal exists yet (issue #50).
+
+    A candidate's ``email`` is the one talent field that can end up as sign-in
+    access: if the owner later runs ``new_hire_onboarding``, a hired candidate's
+    email becomes (or is written onto) a People row. A teammate who can set or
+    change it could plant an address of their choosing for the owner to
+    unknowingly grant access to. Every other candidate/engagement/offer field is
+    ordinary hiring data and stays open to any signed-in user."""
+    from openexecutive.api.routes.chat import require_install_owner
+
+    require_install_owner(request, "set a candidate's email address")
+
+
 # Field length bounds. Short = names/titles/locations/comp bands/department;
 # long = role descriptions, must-haves, and candidate notes that may carry a
 # pasted CV blurb.
@@ -225,6 +240,8 @@ def create_candidate(body: CandidateCreate, request: Request) -> Candidate:
         raise HTTPException(
             status_code=404, detail=f"Engagement {body.engagement_id} not found"
         )
+    if body.email:
+        _require_owner_for_email(request)
     cid = talent_store.upsert_candidate(
         engagement_id=body.engagement_id,
         full_name=body.full_name,
@@ -255,6 +272,8 @@ def patch_candidate(candidate_id: int, body: CandidatePatch, request: Request) -
     # via the exclude_unset key set. `stage` is intentionally not patchable
     # here — use POST /candidates/{id}/stage.
     provided = body.model_dump(exclude_unset=True)
+    if "email" in provided and provided["email"] and provided["email"] != current.email:
+        _require_owner_for_email(request)
     talent_store.upsert_candidate(
         engagement_id=current.engagement_id,
         full_name=body.full_name if body.full_name is not None else current.full_name,

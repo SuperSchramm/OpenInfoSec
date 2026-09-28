@@ -345,3 +345,48 @@ def test_create_candidate_indexing_failure_does_not_break_write(
     # The candidate is still created even though indexing blew up.
     assert out["status"] == "ok"
     assert talent_store.get_candidate(out["candidate"]["id"]) is not None
+
+
+# --------------------------------------------------------------------------- #
+# create_candidate — email is owner-only (issue #50; the HTTP route's
+# _require_owner_for_email doesn't cover this chat tool)
+# --------------------------------------------------------------------------- #
+
+def test_create_candidate_with_email_refuses_a_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
+
+    eid = _seed()
+    for caller in (TurnCaller(person_id=99, from_web_chat=True), None):
+        token = current_turn_caller.set(caller) if caller is not None else None
+        try:
+            out = _call(
+                handle_create_candidate,
+                {"engagement_id": eid, "full_name": "Cam Doe", "email": "cam@example.com"},
+            )
+            assert out["status"] == "refused"
+        finally:
+            if token is not None:
+                current_turn_caller.reset(token)
+    assert talent_store.list_candidates(engagement_id=eid) == []
+
+
+def test_create_candidate_with_email_allows_the_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
+    from openexecutive.people import store as people_store
+
+    monkeypatch.setattr(people_store, "DB_PATH", talent_store.DB_PATH)
+    people_store.initialize_db()
+    alex = people_store.upsert_person(full_name="Alex", is_principal=True)
+    _stub_store(monkeypatch)
+
+    eid = _seed()
+    token = current_turn_caller.set(TurnCaller(person_id=alex, from_web_chat=True))
+    try:
+        out = _call(
+            handle_create_candidate,
+            {"engagement_id": eid, "full_name": "Cam Doe", "email": "cam@example.com"},
+        )
+    finally:
+        current_turn_caller.reset(token)
+    assert out["status"] == "ok"
+    assert out["candidate"]["email"] == "cam@example.com"
