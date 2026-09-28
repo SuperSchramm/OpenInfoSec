@@ -3291,6 +3291,70 @@ clients:
     blank slot (no state.db yet) factory-wipes the per-client tables and
     re-seeds defaults (departments, onboarding templates, principal briefs,
     cadences) so the new client's Today works without a process restart.
+
+    Wipe lists must cover the DERIVED CACHES, not just authored state (issue
+    #54, ported from upstream). `briefing_narrative` and `person_insights`
+    were wiped by NO company-swapping path, and because /today serves the
+    cached narrative unconditionally (regenerating only in a BackgroundTask),
+    whichever path swapped the company rendered the OUTGOING one's narrative
+    under the incoming one. Do not assume `person_insights`' `input_hash`
+    self-guards: that hash covers role/status/counters/UTC-day but NOT person
+    or company identity, and the key is a reused autoincrement `person_id` —
+    so an outgoing principal and a freshly seeded incoming principal hash
+    identically. Ordinary steady state, not a collision. THREE paths swap
+    live company state and each kept its own hand-written table list, which is
+    why fixing one would have left the leak live in the other two. They now
+    all consume `cli.fixture_loader.PER_CLIENT_CACHE_TABLES`:
+    `clients.slots._BLANK_WIPE_TABLES` (blank/seed slot activation,
+    `_wipe_per_client_tables`), `cli.fixture_loader.reset_all_state` (factory
+    reset — also pre-initializes both cache schemas before the DELETE pass,
+    same precedent as `monitoring_store`, since both create their table
+    lazily and a DB that never served a briefing lacks them), and
+    `_seed_episodic_memory` (the fixture load/unload path shared via
+    `_apply_state_from_source` — the worst surface, since a demo loaded over
+    a live company would render that company's real briefing, and a demo is
+    what gets screen-shared; existence-guarded the same way the `alerts`
+    table already was there). Client→client switching into a slot that HAS
+    state.db was never affected: the sqlite backup API truncates the
+    destination to an exact copy. Add any new per-company cache table to
+    `PER_CLIENT_CACHE_TABLES`, once.
+
+    The wipe alone left a race (found by review): both caches also
+    regenerate off the request hot path (`today._regen_briefing_narrative`,
+    `today._regen_stale_insights`, FastAPI `BackgroundTasks`), and a company
+    swap under `_FIXTURE_OP_LOCK` doesn't wait for one already in flight. A
+    swap landing mid-regen would wipe the table, then the outstanding
+    call's `put()` writes the OUTGOING company's text into the incoming
+    company's now-live cache -- the same leak, reopened by timing instead of
+    a missing wipe. Closed the same way `integrations/attachments.py`'s
+    `_schedule_ingest` already closes an identical race against the
+    ChromaDB store (issue #26): both regen functions take an
+    `expected_generation` int, captured via
+    `orchestrator.store_access.get_store_generation()` at scheduling time
+    (every swap path already calls `publish_swapped_store`, which bumps this
+    counter unconditionally) and re-checked right before the cache write; a
+    mismatch skips the write. Same counter, reused rather than a new one,
+    since the hazard is identical: a long-running write racing a destructive
+    swap of the state it's about to write into.
+
+    That guard's correctness relied on `publish_swapped_store` bumping the
+    counter -- true, but round-2 review found it's not a tight enough
+    guarantee to lean on implicitly: that bump runs LATE (after an awaited
+    Honcho/`ingest_file` call on the fixture paths) and is SKIPPED ENTIRELY
+    when `app_state is None`. It happens to still be safe today only because
+    `ingest_file` never yields and every one of the three swap paths reaches
+    `publish_swapped_store` unconditionally -- two facts nothing enforces.
+    Each of the three swap sites now also calls
+    `orchestrator.store_access.bump_store_generation()` explicitly, right
+    next to its own SQLite cache wipe (`_seed_episodic_memory`,
+    `reset_all_state`'s `_delete_all_rows` call, and both
+    `clients.slots._wipe_per_client_tables` and `_restore_db_from_file` --
+    the latter covers switching into a slot that already has `state.db` too),
+    so the guarantee no longer depends on either of those two facts staying
+    true. Known related gap, NOT covered by this fix, tracked separately
+    (#55): scheduled workflow runs (`scheduler/runner.py` -- morning_brief,
+    end_of_day_digest, others) `await` their LLM call and then write their
+    artifact / DM it with no swap-generation check at all.
   invariants:
     - At most one slot is active; the .active_client sentinel records it
       (allowlist-validated on read, same defence as the fixture sentinel).

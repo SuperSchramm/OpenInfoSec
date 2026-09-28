@@ -65,6 +65,28 @@ _FIXTURE_OP_LOCK = asyncio.Lock()
 # sentinel file so a tampered/garbage value cannot reach the UI.
 _SAFE_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 
+# Per-company DERIVED caches in the episodic DB. Regenerable, so always safe to
+# drop -- and they MUST be dropped by every path that swaps the live company
+# (issue #54), because /today serves them from cache and only regenerates in a
+# BackgroundTask. Leave a row behind and the next request renders the OUTGOING
+# company's text under the incoming one: a demo loaded over a live company
+# would render that company's real cached briefing narrative, and a demo is
+# what gets screen-shared. person_insights' input_hash does NOT self-guard
+# against this either: it covers role/is_principal/status/counters/
+# availability/UTC-day, not person or company identity, and the row key is a
+# reused autoincrement person_id -- an outgoing principal and a freshly seeded
+# incoming principal with no awaiting work on the same day hash identically,
+# so the stale note is served as if fresh.
+#
+# Three separate paths swap live company state (reset_all_state, the fixture
+# loader's seed path, and clients.slots' blank-slot activation); every one of
+# them consumes this constant so a future new per-company cache can't repeat
+# this by being wiped in one path and missed in the other two.
+PER_CLIENT_CACHE_TABLES: tuple[str, ...] = (
+    "briefing_narrative",
+    "person_insights",
+)
+
 # Walk up from this file to find the repo root (contains evals/, fixtures/, etc.)
 # Match on ``fixtures/companies`` specifically — NOT a bare ``fixtures`` dir —
 # so the in-package ``openexecutive/fixtures/`` module (generated-fixture store
@@ -762,6 +784,15 @@ async def reset_all_state(
         # circuit (and there's nothing to wipe in a DB that isn't there).
         if EPISODIC_DB_PATH.exists():
             monitoring_store.initialize_db(EPISODIC_DB_PATH)
+            # Same reasoning for the derived caches in PER_CLIENT_CACHE_TABLES
+            # (issue #54): both create their table lazily on first put/get, so
+            # a DB that has never served a briefing lacks them and the DELETE
+            # pass below would raise.
+            from openexecutive.briefing import narrative_cache
+            from openexecutive.people import insights_cache
+
+            narrative_cache.initialize_db(EPISODIC_DB_PATH)
+            insights_cache.initialize_db(EPISODIC_DB_PATH)
         episodic_cleared = _delete_all_rows(
             EPISODIC_DB_PATH,
             (
@@ -780,8 +811,16 @@ async def reset_all_state(
                 "eval_runs",
                 "external_signals",
                 "watchlist",
+                *PER_CLIENT_CACHE_TABLES,
             ),
         )
+        # Bump the swap generation right next to the cache wipe above (issue
+        # #54 round-2 review) -- see the matching comment in
+        # _seed_episodic_memory for why this doesn't lean on
+        # publish_swapped_store's own (later, conditional) bump.
+        from openexecutive.orchestrator.store_access import bump_store_generation
+
+        bump_store_generation()
 
         # 4. People (child tables first to satisfy FK ordering)
         from openexecutive.people import store as people_store
@@ -1221,6 +1260,31 @@ def _seed_episodic_memory(memory_path: Path, settings: Any) -> dict[str, int]:
         )
         if alerts_table_exists:
             conn.execute("DELETE FROM alerts")
+
+        # Derived per-company caches (issue #54). Without this, a fixture load
+        # over a live company (or an unload back to the user's own state, the
+        # two callers of _apply_state_from_source) leaves that company's
+        # cached briefing narrative and person insight notes in place, and the
+        # demo's /today renders them verbatim — the surface most likely to be
+        # screen-shared. Same existence guard as alerts above: a minimal/
+        # legacy DB may not have these tables yet.
+        for cache_table in PER_CLIENT_CACHE_TABLES:
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (cache_table,),
+            ).fetchone():
+                conn.execute(f"DELETE FROM {cache_table}")  # noqa: S608 — fixed constant tuple
+        # Bump the swap generation right next to the wipe (round-2 review):
+        # a background /today regen (today._regen_briefing_narrative,
+        # _regen_stale_insights) skips its cache write when this has moved
+        # past the value it captured at scheduling time. `publish_swapped_store`
+        # (called later by this function's caller) already bumps it too, but
+        # that happens after an `await ingest_file(...)` upstream of here and
+        # is skipped entirely when `app_state is None` -- an explicit bump
+        # here doesn't depend on either staying true.
+        from openexecutive.orchestrator.store_access import bump_store_generation
+
+        bump_store_generation()
 
         decisions = data.get("decisions", [])
         for row in decisions:

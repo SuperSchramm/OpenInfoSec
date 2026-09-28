@@ -42,6 +42,7 @@ from typing import Any
 from openexecutive.cli.fixture_loader import (
     _FIXTURE_OP_LOCK,
     _SAFE_NAME_RE,
+    PER_CLIENT_CACHE_TABLES,
     get_fixture_status,
     snapshot_user_state,
 )
@@ -82,6 +83,10 @@ ENGAGEMENT_STATUSES = ("active", "paused", "winding_down", "completed")
 # Ordered children-before-parents for PRAGMA foreign_keys=ON. Existence-guarded
 # at delete time, so stores that haven't initialized on this box are skipped.
 _BLANK_WIPE_TABLES = (
+    # Derived caches first (issue #54) -- see PER_CLIENT_CACHE_TABLES for why
+    # they must be wiped by every company-swapping path, not just this one.
+    # Neither declares a foreign key, so head position is free.
+    *PER_CLIENT_CACHE_TABLES,
     "chat_messages",
     "sessions",
     "decisions",
@@ -438,6 +443,13 @@ def _restore_db_from_file(state_src: Path) -> None:
     finally:
         dst.close()
         src.close()
+    # Bump the swap generation (issue #54 round-2 review): a background
+    # /today regen already in flight for the outgoing client must not write
+    # its result into the slot's now-live db. Explicit here rather than
+    # leaning on _rebuild_vector_state's later, conditional bump.
+    from openexecutive.orchestrator.store_access import bump_store_generation
+
+    bump_store_generation()
 
 
 def _wipe_per_client_tables() -> None:
@@ -460,6 +472,11 @@ def _wipe_per_client_tables() -> None:
         conn.commit()
     finally:
         conn.close()
+    # Bump the swap generation right next to the wipe (issue #54 round-2
+    # review) -- see _restore_db_from_file's matching comment above.
+    from openexecutive.orchestrator.store_access import bump_store_generation
+
+    bump_store_generation()
 
 
 def _dump_global_tables() -> dict[str, tuple[list[str], list[tuple[Any, ...]]]]:

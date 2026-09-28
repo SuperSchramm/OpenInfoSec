@@ -1411,3 +1411,214 @@ def test_today_talent_empty_when_no_searches(client: TestClient) -> None:
     resp = client.get("/today")
     assert resp.status_code == 200
     assert resp.json()["talent"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Cache-write race with a company swap (issue #54 round-2 review finding)
+# --------------------------------------------------------------------------- #
+
+def test_narrative_regen_skips_the_write_if_the_company_swapped_mid_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A swap (fixture load/unload, reset, client-slot switch) bumps
+    orchestrator.store_access's generation counter AND wipes
+    briefing_narrative. If the regen's slow model call was already in flight
+    when that happened, writing its result afterward would put the OUTGOING
+    company's narrative into the incoming company's freshly-wiped cache --
+    reopening issue #54's leak via a race instead of a missing wipe."""
+    from openexecutive.orchestrator import store_access
+
+    db = tmp_path / "race.db"
+    _setup_isolated_db(db, monkeypatch)
+
+    async def _synth(**_kwargs: object) -> str:
+        # Simulate a swap landing while the "model call" is in flight.
+        store_access.bump_store_generation()
+        return "stale narrative from the outgoing company"
+
+    monkeypatch.setattr(briefing_narrative, "synthesize_briefing_narrative", _synth)
+
+    today_route._build_today()
+    expected_generation = store_access.get_store_generation()
+    import asyncio
+    asyncio.run(
+        today_route._regen_briefing_narrative(
+            None, narrative_cache.DEFAULT_SCOPE, expected_generation
+        )
+    )
+
+    assert narrative_cache.get(db_path=db) is None
+
+
+def test_narrative_regen_writes_normally_when_nothing_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openexecutive.orchestrator import store_access
+
+    db = tmp_path / "no_race.db"
+    _setup_isolated_db(db, monkeypatch)
+
+    async def _synth(**_kwargs: object) -> str:
+        return "fresh narrative"
+
+    monkeypatch.setattr(briefing_narrative, "synthesize_briefing_narrative", _synth)
+
+    expected_generation = store_access.get_store_generation()
+    import asyncio
+    asyncio.run(
+        today_route._regen_briefing_narrative(
+            None, narrative_cache.DEFAULT_SCOPE, expected_generation
+        )
+    )
+
+    cached = narrative_cache.get(db_path=db)
+    assert cached is not None and cached.narrative_text == "fresh narrative"
+
+
+def test_insight_regen_skips_the_write_if_the_company_swapped_mid_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openexecutive.orchestrator import store_access
+    from openexecutive.people import insights as insights_mod
+
+    db = tmp_path / "insight_race.db"
+    _setup_isolated_db(db, monkeypatch)
+    person = people_store.upsert_person(full_name="Alex", is_principal=True)
+    person_row = people_store.get_person(person)
+
+    async def _gen(*_a: object, **_k: object) -> str:
+        store_access.bump_store_generation()
+        return "stale note from the outgoing company"
+
+    monkeypatch.setattr(insights_mod, "generate_person_insight", _gen)
+
+    expected_generation = store_access.get_store_generation()
+    import asyncio
+    asyncio.run(
+        today_route._regen_stale_insights(
+            [(person_row, {}, "h1")], expected_generation
+        )
+    )
+
+    assert insights_cache.get(person, db_path=db) is None
+
+
+def test_insight_regen_writes_normally_when_nothing_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openexecutive.orchestrator import store_access
+    from openexecutive.people import insights as insights_mod
+
+    db = tmp_path / "insight_no_race.db"
+    _setup_isolated_db(db, monkeypatch)
+    person = people_store.upsert_person(full_name="Alex", is_principal=True)
+    person_row = people_store.get_person(person)
+
+    async def _gen(*_a: object, **_k: object) -> str:
+        return "fresh note"
+
+    monkeypatch.setattr(insights_mod, "generate_person_insight", _gen)
+
+    expected_generation = store_access.get_store_generation()
+    import asyncio
+    asyncio.run(
+        today_route._regen_stale_insights(
+            [(person_row, {}, "h1")], expected_generation
+        )
+    )
+
+    cached = insights_cache.get(person, db_path=db)
+    assert cached is not None and cached.insight_text == "fresh note"
+
+
+def test_get_today_route_snapshots_the_generation_before_scheduling_regen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end through the real /today route (not calling the regen
+    function directly): proves the scheduling call site threads
+    get_store_generation() through correctly, AND that the capture happens
+    at scheduling time -- not re-read from inside the background task after
+    it starts, which would defeat the whole guard. A swap landing in the gap
+    between scheduling and the task actually running (simulated here via
+    _attach_narrative, the function that does the scheduling: bumped right
+    after it returns) must still be caught."""
+    from openexecutive.orchestrator import store_access
+
+    db = tmp_path / "route_race.db"
+    _setup_isolated_db(db, monkeypatch)
+
+    real_attach = today_route._attach_narrative
+
+    def _attach_then_swap(*args: object, **kwargs: object) -> None:
+        real_attach(*args, **kwargs)  # captures the generation + schedules the task
+        store_access.bump_store_generation()  # swap lands before the task runs
+
+    monkeypatch.setattr(today_route, "_attach_narrative", _attach_then_swap)
+
+    async def _synth(**_kwargs: object) -> str:
+        return "stale narrative"  # the "model call" itself sees no swap
+
+    monkeypatch.setattr(briefing_narrative, "synthesize_briefing_narrative", _synth)
+
+    _make_client().get("/today").json()  # background task runs during this call
+
+    assert narrative_cache.get(db_path=db) is None
+
+
+def test_get_today_route_snapshots_the_generation_before_scheduling_insight_regen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same as the narrative case, but for the insight-regen scheduling call
+    site -- proven through the real /today route, not a direct call, and with
+    the swap landing in the gap between scheduling and the task running
+    (simulated via _scope_to_caller, the next thing get_today() calls after
+    scheduling the insight regen), not during the "model call" itself."""
+    from openexecutive.orchestrator import store_access
+    from openexecutive.people import insights as insights_mod
+
+    db = tmp_path / "insight_route_race.db"
+    _setup_isolated_db(db, monkeypatch)
+    person = people_store.upsert_person(full_name="Alex", is_principal=True)
+
+    real_scope_to_caller = today_route._scope_to_caller
+
+    def _scope_then_swap(*args: object, **kwargs: object) -> bool:
+        result = real_scope_to_caller(*args, **kwargs)
+        store_access.bump_store_generation()  # swap lands before the task runs
+        return result
+
+    monkeypatch.setattr(today_route, "_scope_to_caller", _scope_then_swap)
+
+    async def _gen(*_a: object, **_k: object) -> str:
+        return "stale note"  # the "model call" itself sees no swap
+
+    monkeypatch.setattr(insights_mod, "generate_person_insight", _gen)
+
+    _make_client().get("/today").json()  # background task runs during this call
+
+    assert insights_cache.get(person, db_path=db) is None
+
+
+def test_get_today_route_caches_the_insight_when_nothing_swapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive companion to the race test above: with no swap, the real
+    /today route's scheduled regen must still actually populate the cache --
+    catches a mutation that makes the generation check always mismatch
+    (e.g. the scheduling call site passing the wrong value) just as well as
+    one that removes the check entirely."""
+    from openexecutive.people import insights as insights_mod
+
+    db = tmp_path / "insight_route_ok.db"
+    _setup_isolated_db(db, monkeypatch)
+    person = people_store.upsert_person(full_name="Alex", is_principal=True)
+
+    async def _gen(*_a: object, **_k: object) -> str:
+        return "a real note"
+
+    monkeypatch.setattr(insights_mod, "generate_person_insight", _gen)
+
+    _make_client().get("/today").json()
+
+    cached = insights_cache.get(person, db_path=db)
+    assert cached is not None and cached.insight_text == "a real note"

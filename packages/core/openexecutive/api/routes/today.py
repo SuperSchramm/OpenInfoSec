@@ -912,13 +912,25 @@ def _build_daily_activity(days: int) -> DailyActivityResponse:
 # Endpoints
 # --------------------------------------------------------------------------- #
 
-async def _regen_stale_insights(stale: list[StaleInsight]) -> None:
+async def _regen_stale_insights(stale: list[StaleInsight], expected_generation: int) -> None:
     """Regenerate and cache insight notes off the request hot path.
 
     Runs as a FastAPI background task after the response is sent. Each person
     is generated concurrently and guarded so one slow/failed model call can
     neither hang the batch nor surface to the user.
+
+    `expected_generation` (issue #54, same defence as `attachments.py`'s
+    `_schedule_ingest`, issue #26): the caller's snapshot of
+    `orchestrator.store_access.get_store_generation()`, taken before this task
+    was scheduled and re-checked here before each write. A company swap
+    (fixture load/unload, reset, a client-slot switch) bumps the generation
+    AND wipes `person_insights` (`cli.fixture_loader.PER_CLIENT_CACHE_TABLES`)
+    -- without this check, an insight call already in flight when the swap
+    landed would write the OUTGOING company's note into the now-live
+    (wiped, then re-populated by this stale write) incoming company's cache,
+    reopening the leak issue #54 otherwise closes.
     """
+    from openexecutive.orchestrator.store_access import get_store_generation
     from openexecutive.people import insights, insights_cache
 
     async def _one(person: Person, signals: dict[str, Any], input_hash: str) -> None:
@@ -929,6 +941,12 @@ async def _regen_stale_insights(stale: list[StaleInsight]) -> None:
             )
         except Exception:
             logger.exception("today: insight regen failed for person_id=%s", person.id)
+            return
+        if get_store_generation() != expected_generation:
+            logger.info(
+                "today: company swapped during insight regen for person_id=%s; "
+                "skipping stale write", person.id,
+            )
             return
         if text and person.id:
             insights_cache.put(insights_cache.PersonInsight(
@@ -1022,6 +1040,7 @@ def _attach_narrative(
     background regeneration when it's missing/stale. `background_tasks=None`
     (the deprecated alias) serves cache-only without scheduling regen."""
     from openexecutive.briefing import narrative_cache
+    from openexecutive.orchestrator.store_access import get_store_generation
 
     scope, today_data, _desc, _viewer = _narrative_inputs(response, caller_person_id)
     try:
@@ -1031,13 +1050,19 @@ def _attach_narrative(
             response.narrative = cached.narrative_text
         is_stale = cached is None or cached.input_hash != nhash
         if is_stale and background_tasks is not None:
-            background_tasks.add_task(_regen_briefing_narrative, caller_person_id, scope)
+            # Snapshot the generation NOW (issue #54): the regen task's own
+            # re-check is only useful if it's comparing against the value at
+            # scheduling time, not whatever a later `get_store_generation()`
+            # call inside the task would see.
+            background_tasks.add_task(
+                _regen_briefing_narrative, caller_person_id, scope, get_store_generation()
+            )
     except Exception:
         logger.exception("today: briefing narrative attach failed (scope=%s)", scope)
 
 
 async def _regen_briefing_narrative(
-    caller_person_id: int | None, expected_scope: str
+    caller_person_id: int | None, expected_scope: str, expected_generation: int
 ) -> None:
     """Regenerate and cache the viewer's briefing narrative off the hot path.
 
@@ -1051,9 +1076,19 @@ async def _regen_briefing_narrative(
     scope changed in between (e.g. the person was deleted, collapsing them to
     the principal scope) we skip the write rather than churn / overwrite a
     different scope's cache entry.
+
+    `expected_generation` (issue #54, same defence as `attachments.py`'s
+    `_schedule_ingest`, issue #26): the caller's snapshot of
+    `orchestrator.store_access.get_store_generation()`, re-checked right
+    before the write. A company swap bumps the generation AND wipes
+    `briefing_narrative`; without this check, a regen already in flight when
+    the swap landed would write the OUTGOING company's narrative into the
+    incoming one's now-live cache -- the exact leak issue #54's wipe-list fix
+    exists to close, reopened by a race instead of a missing wipe.
     """
     from openexecutive.briefing import narrative_cache
     from openexecutive.briefing.narrative import synthesize_briefing_narrative
+    from openexecutive.orchestrator.store_access import get_store_generation
 
     try:
         snapshot = _build_today()
@@ -1084,6 +1119,12 @@ async def _regen_briefing_narrative(
         return
 
     if not text:
+        return
+    if get_store_generation() != expected_generation:
+        logger.info(
+            "today: company swapped during narrative regen (scope=%s); "
+            "skipping stale write", scope,
+        )
         return
     input_hash = narrative_cache.build_narrative_input_hash(today_data, scope=scope)
     narrative_cache.put(narrative_cache.BriefingNarrative(
@@ -1121,7 +1162,11 @@ async def get_today(request: Request, background_tasks: BackgroundTasks) -> Toda
     from openexecutive.api.routes.chat import _resolve_caller_person_id
     response.caller_person_id = _resolve_caller_person_id(request)
     if stale:
-        background_tasks.add_task(_regen_stale_insights, stale)
+        from openexecutive.orchestrator.store_access import get_store_generation
+
+        # Snapshotted now (issue #54), not re-read inside the task -- see
+        # _regen_briefing_narrative's matching comment below.
+        background_tasks.add_task(_regen_stale_insights, stale, get_store_generation())
     if _scope_to_caller(response):
         _attach_narrative(
             response,
