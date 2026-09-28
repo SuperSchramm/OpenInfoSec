@@ -20,16 +20,16 @@ from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_ca
 
 def test_set_then_reset_restores_the_prior_value() -> None:
     assert current_turn_caller.get() is None
-    outer_token = current_turn_caller.set(TurnCaller(person_id=1, from_web_chat=True))
+    outer_token = current_turn_caller.set(TurnCaller(person_id=1, verified=True))
     try:
-        assert current_turn_caller.get() == TurnCaller(person_id=1, from_web_chat=True)
-        inner_token = current_turn_caller.set(TurnCaller(person_id=2, from_web_chat=True))
+        assert current_turn_caller.get() == TurnCaller(person_id=1, verified=True)
+        inner_token = current_turn_caller.set(TurnCaller(person_id=2, verified=True))
         try:
-            assert current_turn_caller.get() == TurnCaller(person_id=2, from_web_chat=True)
+            assert current_turn_caller.get() == TurnCaller(person_id=2, verified=True)
         finally:
             current_turn_caller.reset(inner_token)
         # A nested turn's reset restores the outer turn's caller, not None.
-        assert current_turn_caller.get() == TurnCaller(person_id=1, from_web_chat=True)
+        assert current_turn_caller.get() == TurnCaller(person_id=1, verified=True)
     finally:
         current_turn_caller.reset(outer_token)
     assert current_turn_caller.get() is None

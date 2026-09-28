@@ -126,7 +126,7 @@ def test_forbidden_and_unknown_run_ids_look_the_same(client: TestClient) -> None
 # --- chat tool ---------------------------------------------------------------------
 
 def _as(person_id: int | None, *, web: bool = True):
-    return current_turn_caller.set(TurnCaller(person_id=person_id, from_web_chat=web))
+    return current_turn_caller.set(TurnCaller(person_id=person_id, verified=web))
 
 
 def _run_tool(inputs) -> dict:

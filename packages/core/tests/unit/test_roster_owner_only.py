@@ -184,7 +184,7 @@ ROSTER_TOOLS = [
 
 @pytest.mark.parametrize("tool,payload", ROSTER_TOOLS, ids=["upsert", "archive", "set_head"])
 def test_a_teammate_cannot_change_the_roster_through_the_executive(tool: Any, payload: dict[str, Any], people: dict[str, int], speaker: Any) -> None:
-    speaker(TurnCaller(person_id=people["sabin"], from_web_chat=True))
+    speaker(TurnCaller(person_id=people["sabin"], verified=True))
     result = _run(tool, payload)
     assert result["status"] == "refused"
     assert "owner" in result["detail"]
@@ -200,19 +200,19 @@ def test_a_turn_with_no_recorded_speaker_is_refused(tool: Any, payload: dict[str
 
 
 def test_even_the_principal_is_refused_off_the_verified_web_surface(people: dict[str, int], speaker: Any) -> None:
-    speaker(TurnCaller(person_id=people["alex"], from_web_chat=False))
+    speaker(TurnCaller(person_id=people["alex"], verified=False))
     assert _run(people_tools.handle_upsert_person, {"full_name": "Via Email"})["status"] == "refused"
     assert len(people_store.list_people()) == 2
 
 
 def test_a_signed_in_user_not_on_the_roster_is_refused_by_the_tools(people: dict[str, int], speaker: Any) -> None:
-    speaker(TurnCaller(person_id=None, from_web_chat=True))
+    speaker(TurnCaller(person_id=None, verified=True))
     result = _run(people_tools.handle_upsert_person, {"full_name": "X"})
     assert result["status"] == "refused" and "not on anyone's People entry" in result["detail"]
 
 
 def test_the_principal_on_the_web_chat_can_still_use_the_tools(people: dict[str, int], speaker: Any) -> None:
-    speaker(TurnCaller(person_id=people["alex"], from_web_chat=True))
+    speaker(TurnCaller(person_id=people["alex"], verified=True))
     result = _run(people_tools.handle_upsert_person, {"full_name": "Cindy Lee", "role": "Marketing"})
     assert result.get("status") != "refused" and "error" not in result
     assert "Cindy Lee" in [p.full_name for p in people_store.list_people()]
@@ -221,7 +221,7 @@ def test_the_principal_on_the_web_chat_can_still_use_the_tools(people: dict[str,
 def test_a_refused_roster_change_is_audited(people: dict[str, int], speaker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[Any, ...]] = []
     monkeypatch.setattr(people_tools, "_audit", lambda *a, **k: seen.append(a))
-    speaker(TurnCaller(person_id=people["sabin"], from_web_chat=True))
+    speaker(TurnCaller(person_id=people["sabin"], verified=True))
     _run(people_tools.handle_archive_person, {"person_id": people["alex"]})
     assert seen and seen[0][0] == "archive_person" and seen[0][2] is False
 
@@ -276,9 +276,9 @@ def test_the_web_chat_records_the_verified_speaker_for_the_tools(db: Path, peopl
         _ = c.post("/chat", json={"message": "hi"}, headers=headers).text
 
     assert seen == [
-        TurnCaller(person_id=people["sabin"], from_web_chat=True),
-        TurnCaller(person_id=people["alex"], from_web_chat=True),
-        TurnCaller(person_id=None, from_web_chat=True),
+        TurnCaller(person_id=people["sabin"], verified=True, surface="web_chat"),
+        TurnCaller(person_id=people["alex"], verified=True, surface="web_chat"),
+        TurnCaller(person_id=None, verified=True, surface="web_chat"),
     ]
 
 
@@ -361,8 +361,8 @@ def test_reading_fixtures_and_clients_stays_open(full_client: TestClient, people
 def test_the_roster_writing_workflows_are_declared_and_exist() -> None:
     from openexecutive.workflows import ROSTER_WRITING_WORKFLOWS, WORKFLOW_REGISTRY
 
-    assert ROSTER_WRITING_WORKFLOWS == {"new_hire_onboarding"}
-    assert ROSTER_WRITING_WORKFLOWS <= set(WORKFLOW_REGISTRY)
+    assert {"new_hire_onboarding"} == ROSTER_WRITING_WORKFLOWS
+    assert set(WORKFLOW_REGISTRY) >= ROSTER_WRITING_WORKFLOWS
 
 
 @pytest.fixture()
@@ -402,7 +402,7 @@ def test_other_workflows_are_not_gated(wf_client: TestClient, people: dict[str, 
      {"workflow": "new_hire_onboarding", "inputs": {"candidate_id": 1}}),
 ], ids=["start_talent_workflow", "run_workflow"])
 def test_the_executives_workflow_tools_will_not_start_the_new_hire_workflow_for_a_teammate(tool: Any, payload: dict[str, Any], people: dict[str, int], speaker: Any) -> None:
-    speaker(TurnCaller(person_id=people["sabin"], from_web_chat=True))
+    speaker(TurnCaller(person_id=people["sabin"], verified=True))
     assert _run(tool(), payload)["status"] == "refused"
     speaker(None)  # channel adapter, scheduler, CLI: no recorded speaker
     assert _run(tool(), payload)["status"] == "refused"
@@ -484,3 +484,22 @@ def test_a_genuinely_new_hire_still_creates_a_person(db: Path) -> None:
 
     pid, created = _upsert_hire_person(_hire_ctx("Brand New", "new@example.com"))
     assert created is True and people_store.get_person(pid).email == "new@example.com"
+
+
+def test_a_discord_verified_owner_can_use_the_roster_tools(
+    people: dict[str, int], speaker: Any
+) -> None:
+    """Issue #53: Discord (like the web chat) is now a verified surface, so the
+    owner is no longer confined to the web app to change the roster."""
+    speaker(TurnCaller(person_id=people["alex"], verified=True, surface="discord"))
+    result = _run(people_tools.handle_upsert_person, {"full_name": "Via Discord"})
+    assert result.get("status") != "refused" and "error" not in result
+    assert "Via Discord" in [p.full_name for p in people_store.list_people()]
+
+
+def test_a_discord_verified_teammate_is_still_refused(
+    people: dict[str, int], speaker: Any
+) -> None:
+    speaker(TurnCaller(person_id=people["sabin"], verified=True, surface="discord"))
+    result = _run(people_tools.handle_upsert_person, {"full_name": "Via Discord"})
+    assert result["status"] == "refused"

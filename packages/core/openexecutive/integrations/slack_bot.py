@@ -380,16 +380,28 @@ def create_slack_app():
                 )
 
             executive = Executive(mcp_gateway=get_active_gateway())
-            response = asyncio.run(
-                executive.chat(
-                    user_message=chat_user_message,
-                    session=session,
-                    retrieved_context=retrieved_context,
-                    episodic_context=episodic_context,
-                    person_id=person_id,
-                    co_present_person_ids=co_present_person_ids or None,
+            # The sender is authenticated by Bolt's own connection (this bot runs
+            # Socket Mode: a persistent, app-token-authenticated WebSocket, not an
+            # unauthenticated HTTP endpoint), but only a DM is 1:1 -- a channel/
+            # thread Session is shared, and its history (which the model reads)
+            # can carry another rostered teammate's planted instruction, so a
+            # channel turn is NOT verified here even though the sender is
+            # authentic (issue #53). `asyncio.run` copies the current
+            # contextvars.Context into its new task, so the set inside
+            # `recorded_turn` is visible inside `executive.chat`.
+            from openexecutive.orchestrator.turn_identity import recorded_turn
+
+            with recorded_turn(person_id, verified=(mode == "dm"), surface="slack"):
+                response = asyncio.run(
+                    executive.chat(
+                        user_message=chat_user_message,
+                        session=session,
+                        retrieved_context=retrieved_context,
+                        episodic_context=episodic_context,
+                        person_id=person_id,
+                        co_present_person_ids=co_present_person_ids or None,
+                    )
                 )
-            )
 
             say(text=response, thread_ts=thread_ts)
 

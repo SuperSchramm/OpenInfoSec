@@ -492,7 +492,7 @@ def test_cancel_event_marks_reversed() -> None:
 
     principal = find_principal_person()
     assert principal is not None
-    token = current_turn_caller.set(TurnCaller(person_id=principal.id, from_web_chat=True))
+    token = current_turn_caller.set(TurnCaller(person_id=principal.id, verified=True))
     gw = _fake_gateway()
     try:
         with (
@@ -510,7 +510,7 @@ def test_cancel_nonexistent_returns_error() -> None:
     from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
 
     owner = _add_person("Owner", "owner@example.com", is_principal=True)
-    token = current_turn_caller.set(TurnCaller(person_id=owner, from_web_chat=True))
+    token = current_turn_caller.set(TurnCaller(person_id=owner, verified=True))
     try:
         with patch("openexecutive.orchestrator.mcp_gateway.get_active_gateway",
                    return_value=_fake_gateway()):

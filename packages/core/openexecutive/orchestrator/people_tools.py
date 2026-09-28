@@ -242,17 +242,20 @@ def _roster_refusal_reason(caller: Any) -> str | None:
     """None when this turn may change the roster, else what to tell the asker.
 
     Only the principal, and only on a surface that verified who is speaking (the
-    signed-in web chat). Anything else -- an inbound email, a Google Chat message,
-    a Slack/Discord/Telegram message (not yet wired to record the verified
-    speaker), a teammate, the CLI, the scheduler or a workflow -- is refused, so
-    the owner makes the change from the People page or the web chat."""
+    signed-in web chat, or a channel adapter whose platform authenticated the
+    message -- Discord, Slack, Telegram with a webhook secret configured).
+    Anything else -- an inbound email, Google Chat (issue #53: no roster
+    gate/Person resolution wired yet), a teammate, the CLI, the scheduler or a
+    workflow -- is refused, so the owner makes the change from the People page,
+    the web chat, or one of those channels."""
     from openexecutive.people.store import is_principal_or_self
 
-    if caller is None or not getattr(caller, "from_web_chat", False):
+    if caller is None or not getattr(caller, "verified", False):
         return (
             "Only the company's owner can change the People list, and this request "
             "did not come from somewhere I can confirm it is them. Tell whoever "
-            "asked that the owner needs to make this change from the web app."
+            "asked that the owner needs to make this change from the web app, or "
+            "Discord, Slack or Telegram."
         )
     try:
         if is_principal_or_self(getattr(caller, "person_id", None), None):
@@ -290,7 +293,8 @@ def _refuse_unless_owner(tool: str) -> str | None:
         {
             "refused": True,
             "caller_person_id": getattr(caller, "person_id", None),
-            "from_web_chat": bool(getattr(caller, "from_web_chat", False)),
+            "verified": bool(getattr(caller, "verified", False)),
+            "surface": getattr(caller, "surface", "unknown"),
         },
     )
     return json.dumps({"status": "refused", "detail": reason})

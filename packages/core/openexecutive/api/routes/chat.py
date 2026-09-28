@@ -585,7 +585,7 @@ async def _run_chat_turn(
         # but resetting explicitly means that stays true if one is ever added,
         # instead of silently inheriting this turn's caller.
         turn_caller_token = current_turn_caller.set(
-            TurnCaller(person_id=caller_person_id, from_web_chat=True)
+            TurnCaller(person_id=caller_person_id, verified=True, surface="web_chat")
         )
 
         full_response = ""

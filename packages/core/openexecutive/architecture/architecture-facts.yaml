@@ -1232,12 +1232,32 @@ people:
     Executive's roster tools (`upsert_person`, `archive_person`,
     `set_department_head`) are gated too (`people_tools._refuse_unless_owner`):
     only the principal, and only on a surface that verified who is speaking. The
-    web chat records the verified speaker per request in
-    `orchestrator.turn_identity.current_turn_caller` (a context variable, not a
-    field of the shared `Session`); channel adapters, the scheduler, workflows,
-    the CLI and the MCP server never record one, so they fail closed (Slack and
-    Discord are not yet wired to record their verified speaker: the owner makes
-    roster changes from the People page or the web chat).
+    web chat, Discord, Slack and Telegram (issue #53) all record the verified
+    speaker per request in `orchestrator.turn_identity.current_turn_caller` (a
+    context variable, not a field of the shared `Session`, since two people can
+    use the same Session in turn): `TurnCaller(person_id, verified, surface)`.
+    "Verified" needs BOTH of: the PLATFORM authenticated the message before this
+    process ever saw it (not just that a channel id was resolved to a Person --
+    Discord and Slack's gateway/Bolt connections, Telegram only when
+    `telegram_webhook_secret` is configured; an unconfigured webhook accepts any
+    POST), AND the turn is on a 1:1 surface -- the web chat (its Session is
+    per-user), a Discord/Slack DM, or a Telegram private chat (`chat_id > 0`;
+    group/channel ids are negative). A Discord/Slack channel or thread is
+    excluded even though the sender there is just as authentic, because its
+    Session (and so the history the model reads) is SHARED: another rostered
+    teammate's earlier message in that thread is in context when the principal
+    speaks there, so trusting every channel turn would let a teammate plant an
+    instruction for the model to act on under a "verified" caller (found by
+    review). Telegram's `chat_id > 0` gate closes the same class of gap for a
+    Person whose `telegram_chat_id` is itself a group: without it, any member of
+    that group would resolve to them. `orchestrator.turn_identity.recorded_turn`
+    is the shared set/reset helper all three channel adapters and (via its own
+    inline equivalent) the web chat use, so the pairing can't drift between them.
+    The scheduler, workflows, the CLI, the MCP server, a channel/group turn, and
+    inbound email (spoofable) never record a verified one, so they fail closed.
+    Google Chat has no roster gate or Person resolution at all yet (a separate,
+    larger gap than this issue), so there is nothing to record there either --
+    tracked as a follow-up, not silently dropped.
     The routes that wipe or swap the company's data are the owner's call too, via
     `chat.require_install_owner` (principal, or no principal yet): every write on
     /fixtures (snapshot, reset, unload, load, generate, create, delete) and
@@ -1282,12 +1302,26 @@ people:
     `is_principal=True` while one is already active (`archived=0`) -- the only
     place the flag is set (PersonPatch has no such field; the roster chat tool
     refuses it outright). 409 on POST /people, and the Executive's `upsert_person`
-    tool already could not reach this path. Deliberately NOT blocked: archiving
-    the sole active principal, which is the existing (if narrow) way an owner
-    hands off -- archive self, then whoever claims the now-unclaimed install next
-    becomes the new principal. Blocking that would remove the only handoff path
-    without adding a replacement, so it stays a known gap (tracked, not silently
-    dropped).
+    tool already could not reach this path.
+
+    Ownership handoff (issue #53): `people.transfer_principal` (POST
+    /people/{id}/transfer-principal, owner-only) hands ownership to another
+    existing, non-archived Person atomically -- `BEGIN IMMEDIATE`, clear
+    `is_principal` off every active-principal row (not just one -- the schema
+    doesn't enforce uniqueness, so a pre-existing duplicate must not survive)
+    and set it on the target, all in the same write transaction -- so there is
+    no unclaimed window at all. The route also passes the caller's own id as
+    `expected_current_principal_id`, re-checked inside the same transaction:
+    `_require_roster_owner` only confirms the caller was principal when ITS
+    request started, so two of the caller's own requests racing (e.g. a
+    double-click) could otherwise have the second one strip ownership from
+    whoever the first one just promoted (found by review; the second request
+    now gets 409 and does nothing). This replaces the earlier gap this note
+    used to describe (archive self first, then whoever claims the
+    now-unclaimed install next becomes principal, not necessarily the intended
+    successor): that path still exists (nothing stops an owner from archiving
+    themselves without transferring first, useful when there is no designated
+    successor yet), but `transfer-principal` is the one to use when there is one.
 
     Recovering fixture/CLI access (issue #50): after the owner loads a fixture,
     the owner's own signed-in email usually does not match the fixture's

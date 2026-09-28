@@ -8,6 +8,8 @@ Bolt client deeply and aren't necessary for the gate logic itself.
 """
 from __future__ import annotations
 
+import inspect
+
 from openexecutive.integrations import slack_bot
 from openexecutive.integrations.slack_bot import (
     _count_distinct_humans,
@@ -167,3 +169,29 @@ def test_bot_user_id_starts_unresolved():
     succeeds. Tests must not rely on a populated cache."""
     # Tolerate prior tests setting the cache; just confirm the attribute exists.
     assert hasattr(slack_bot, "_bot_user_id")
+
+
+# --------------------------------------------------------------------------- #
+# _handle_message_sync — verified speaker (issue #53)
+# --------------------------------------------------------------------------- #
+#
+# `_handle_message_sync` is a closure inside `create_slack_app()` (which needs
+# a real Bolt App + a live `auth_test()` call to construct), so it can't be
+# imported and driven directly the way Discord's module-level `_handle_message`
+# can -- consistent with this file's own documented scope (see the module
+# docstring). This is a source-level regression guard instead: it pins the
+# exact TurnCaller wiring so a refactor that silently drops it fails a test,
+# not just a manual read.
+
+
+def test_slack_handler_records_a_verified_caller_only_in_dms_around_executive_chat():
+    source = inspect.getsource(slack_bot)
+    needle = 'with recorded_turn(person_id, verified=(mode == "dm"), surface="slack"):'
+    assert needle in source
+    # The `with` must wrap the executive.chat call, not merely appear somewhere
+    # in the file -- and verified is tied to `mode == "dm"`, not always True (a
+    # channel/thread Session is shared, so a channel turn must not be trusted
+    # the way a DM is -- found by review).
+    with_at = source.index(needle)
+    chat_at = source.index("executive.chat(", with_at)
+    assert with_at < chat_at < with_at + 400  # executive.chat is inside this `with`'s body

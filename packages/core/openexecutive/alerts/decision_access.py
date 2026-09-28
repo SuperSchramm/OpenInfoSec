@@ -47,14 +47,15 @@ def tool_refusal(
 ) -> str | None:
     """The refusal result when this chat turn may not act, else None.
 
-    Needs a verified speaker (``orchestrator.turn_identity``: only the signed-in
-    web chat records one), so an inbound email, a channel adapter, the scheduler
-    or a workflow -- which record none -- fail closed, like the roster tools."""
+    Needs a verified speaker (``orchestrator.turn_identity``: the signed-in web
+    chat, or a channel adapter whose platform authenticated the message), so an
+    inbound email, the scheduler or a workflow -- which record none -- fail
+    closed, like the roster tools."""
     from openexecutive.orchestrator.turn_identity import current_turn_caller
 
     caller = current_turn_caller.get()
     person_id = getattr(caller, "person_id", None)
-    if caller is not None and getattr(caller, "from_web_chat", False):
+    if caller is not None and getattr(caller, "verified", False):
         try:
             if allowed(person_id):
                 return None
@@ -66,6 +67,6 @@ def tool_refusal(
         "status": "refused",
         "detail": detail or (
             "That proposal belongs to someone else. Only its owner (the person it was "
-            "routed to) or the company's principal can act on it, from the web app."
+            "routed to) or the company's principal can act on it."
         ),
     })

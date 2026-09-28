@@ -196,3 +196,34 @@ def archive_person(person_id: int, request: Request) -> Response:
     people_store.archive_person(person_id)
     people_registry.invalidate()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/people/{person_id}/transfer-principal", response_model=Person)
+def transfer_principal(person_id: int, request: Request) -> Person:
+    """Hand ownership to this Person, with no unclaimed window (issue #53).
+
+    Only the current principal may call this (``_require_roster_owner``):
+    unlike archiving yourself first, at no point does the install become
+    unclaimed, so a teammate racing the handoff can't claim it instead.
+
+    Passes the caller's own id as ``expected_current_principal_id`` so the
+    store re-checks, inside the write transaction, that ownership hasn't
+    already changed since this request started -- `_require_roster_owner`
+    above only confirmed that at the top of this request, so two of the
+    caller's own requests racing could otherwise strip ownership from
+    whoever the first one just promoted."""
+    _require_roster_owner(request)
+    from openexecutive.api.routes.chat import _resolve_caller_person_id
+
+    caller_person_id = _resolve_caller_person_id(request)
+    try:
+        people_store.transfer_principal(person_id, caller_person_id)
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 404 if "not found" in detail else 409
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    people_registry.invalidate()
+    person = people_store.get_person(person_id)
+    if person is None:
+        raise HTTPException(status_code=500, detail="Person vanished")
+    return person

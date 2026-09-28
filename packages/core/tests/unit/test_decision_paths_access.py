@@ -184,7 +184,7 @@ def test_ack_route_ordinary_alert_unchanged(client: TestClient) -> None:
 # --- chat tools -----------------------------------------------------------------
 
 def _as(person_id: int | None, *, web: bool = True):
-    return current_turn_caller.set(TurnCaller(person_id=person_id, from_web_chat=web))
+    return current_turn_caller.set(TurnCaller(person_id=person_id, verified=web))
 
 
 def _run(coro) -> dict:

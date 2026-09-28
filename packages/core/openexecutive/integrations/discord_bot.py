@@ -771,15 +771,24 @@ async def _handle_message(
                 )
 
             executive = Executive(mcp_gateway=get_active_gateway())
-            response = await executive.chat(
-                user_message=chat_user_message,
-                session=session,
-                retrieved_context=retrieved_context,
-                episodic_context=episodic_context,
-                attachment_blocks=attachment_blocks or None,
-                person_id=person_id,
-                co_present_person_ids=co_present_person_ids or None,
-            )
+            # The sender is authenticated by Discord's own gateway connection
+            # (the roster gate above already resolved discord_user_id -> Person),
+            # but only a DM is 1:1 -- a channel/thread Session is shared, and its
+            # history (which the model reads) can carry another rostered
+            # teammate's planted instruction, so a channel turn is NOT verified
+            # here even though the sender is authentic (issue #53).
+            from openexecutive.orchestrator.turn_identity import recorded_turn
+
+            with recorded_turn(person_id, verified=is_dm, surface="discord"):
+                response = await executive.chat(
+                    user_message=chat_user_message,
+                    session=session,
+                    retrieved_context=retrieved_context,
+                    episodic_context=episodic_context,
+                    attachment_blocks=attachment_blocks or None,
+                    person_id=person_id,
+                    co_present_person_ids=co_present_person_ids or None,
+                )
 
             # Late routing: for the @mention auto-thread path, the router
             # decides inline-vs-thread after seeing the full reply. The

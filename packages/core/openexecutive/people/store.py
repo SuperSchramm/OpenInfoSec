@@ -515,6 +515,80 @@ def archive_person(person_id: int, db_path: Path | None = None) -> bool:
         return cursor.rowcount > 0
 
 
+def transfer_principal(
+    new_principal_id: int,
+    expected_current_principal_id: int | None = None,
+    db_path: Path | None = None,
+) -> int:
+    """Hand ownership to another existing Person, atomically -- no unclaimed
+    window (issue #53).
+
+    Before this, the only way to change owners was to archive the current
+    principal first, which makes the install briefly "unclaimed"
+    (``chat._caller_is_principal_or_unclaimed`` then admits anyone), so
+    whoever claims it first becomes the new owner -- not necessarily the
+    person the outgoing owner meant to hand off to. This flips ``is_principal``
+    off every active-principal row and onto ``new_principal_id`` inside one
+    write transaction, so at no point is the install unclaimed. `BEGIN
+    IMMEDIATE` serializes it against a concurrent write, the same defence
+    `upsert_person`'s principal-uniqueness check uses.
+
+    ``expected_current_principal_id``, when given, must match who is
+    principal at the moment the transaction actually runs (checked *inside*
+    the lock, not just by the caller before calling this): the HTTP route's
+    `_require_roster_owner` only confirms the caller was the principal when
+    THAT request started, so two of the caller's own requests racing (e.g. a
+    double-click) could otherwise have the second one silently strip
+    ownership from whoever the first one just promoted -- found by review.
+
+    Raises ``ValueError`` (never silently no-ops) when: there is no active
+    principal to transfer from, the caller's expectation of who that is no
+    longer holds, ``new_principal_id`` is already a principal, it does not
+    exist, or it is archived (promoting an archived row would leave the
+    roster with an owner nobody can act as). The archive-self path remains
+    for when there is no designated successor yet."""
+    with _get_conn(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # Every active-principal row, not just one: the schema does not
+        # enforce uniqueness (`idx_people_principal` isn't UNIQUE), so a
+        # pre-existing duplicate must not survive a transfer that claims to
+        # leave exactly one principal -- found by review.
+        current_ids = [
+            int(r["id"])
+            for r in conn.execute(
+                "SELECT id FROM people WHERE is_principal = 1 AND archived = 0 ORDER BY id"
+            ).fetchall()
+        ]
+        if not current_ids:
+            raise ValueError("There is no active principal to transfer ownership from.")
+        if expected_current_principal_id is not None and (
+            len(current_ids) != 1 or current_ids[0] != expected_current_principal_id
+        ):
+            raise ValueError(
+                "Ownership already changed since this request started; refusing to "
+                "avoid stripping it from whoever holds it now."
+            )
+        if new_principal_id in current_ids:
+            raise ValueError("That person is already the principal.")
+        target = conn.execute(
+            "SELECT archived FROM people WHERE id = ?", (new_principal_id,)
+        ).fetchone()
+        if target is None:
+            raise ValueError(f"Person {new_principal_id} not found.")
+        if target["archived"]:
+            raise ValueError("Cannot make an archived person the principal.")
+        now = _now()
+        conn.execute(
+            "UPDATE people SET is_principal = 0, updated_at = ? WHERE is_principal = 1",
+            (now,),
+        )
+        conn.execute(
+            "UPDATE people SET is_principal = 1, updated_at = ? WHERE id = ?",
+            (now, new_principal_id),
+        )
+        return current_ids[0]
+
+
 def find_approvers(
     scope: AuthorityScope,
     db_path: Path | None = None,

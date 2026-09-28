@@ -289,14 +289,28 @@ async def _process_and_reply(
                     user_message=message_text,
                 )
 
-            response = await Executive(mcp_gateway=get_active_gateway()).chat(
-                user_message=chat_user_message,
-                session=session,
-                retrieved_context=retrieved_context,
-                episodic_context=episodic_context,
-                attachment_blocks=att_image_blocks or None,
-                person_id=person_id,
-            )
+            # Unlike Discord/Slack, an unconfigured Telegram webhook accepts any
+            # POST -- verified only when telegram_webhook_secret is set, since
+            # only then has telegram_webhook() already checked
+            # X-Telegram-Bot-Api-Secret-Token before scheduling this task. Also
+            # only in a private 1:1 chat (positive chat_id; group/channel ids are
+            # negative): a group's Session is shared (another rostered member's
+            # message is in the history the model reads), and a Person's
+            # `telegram_chat_id` could itself be a group, in which case ANY
+            # member resolves to that Person via find_person_by_telegram_chat_id
+            # -- trusting that would let any of them act as them (issue #53).
+            from openexecutive.orchestrator.turn_identity import recorded_turn
+
+            verified = bool(get_settings().telegram_webhook_secret) and chat_id > 0
+            with recorded_turn(person_id, verified=verified, surface="telegram"):
+                response = await Executive(mcp_gateway=get_active_gateway()).chat(
+                    user_message=chat_user_message,
+                    session=session,
+                    retrieved_context=retrieved_context,
+                    episodic_context=episodic_context,
+                    attachment_blocks=att_image_blocks or None,
+                    person_id=person_id,
+                )
             await send_message(token, chat_id, response)
         except Exception:
             logger.exception("Telegram: handler error for message %s", message_id)

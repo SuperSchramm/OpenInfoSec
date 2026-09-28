@@ -2129,3 +2129,64 @@ async def test_on_message_roster_lookup_emits_no_audit_row_of_its_own(
         await discord_bot_instance.on_message(_make_attachment_message(discord_module))
 
     mock_audit_log.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# _handle_message — verified speaker (issue #53)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_dm", [True, False])
+async def test_handle_message_records_a_verified_caller_only_in_dms(is_dm: bool):
+    """Discord's gateway authenticates the sender, so the roster gate having
+    already resolved a Person means a DM turn is a verified surface for
+    orchestrator.turn_identity -- but a channel/thread turn is NOT, even
+    though the sender is just as authentic there, because its Session is
+    shared: another rostered teammate's earlier message in that history is in
+    context when this one is sent, so trusting it would let a teammate plant
+    an instruction for the model to act on under a 'verified' caller."""
+    from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
+
+    seen: list[TurnCaller | None] = []
+
+    async def _capture(**_kw: object) -> str:
+        seen.append(current_turn_caller.get())
+        return "ok"
+
+    with (
+        patch("openexecutive.people.store.find_person_by_discord_id", return_value=MagicMock(id=42)),
+        patch("openexecutive.alerts.pipeline.schedule_evaluation"),
+        patch("openexecutive.knowledge.retriever.retrieve", return_value=""),
+        patch("openexecutive.memory.episodic.format_for_prompt", return_value=""),
+        patch("openexecutive.onboarding.profile_builder.load_or_create_profile") as mock_profile,
+        patch("openexecutive.orchestrator.executive.Executive") as MockExec,
+        patch("openexecutive.orchestrator.mcp_gateway.get_active_gateway", return_value=None),
+        patch("openexecutive.orchestrator.session.Session") as MockSession,
+        patch("openexecutive.audit.log_event"),
+        patch("openexecutive.memory.session_store.load_messages", return_value=[]),
+        patch("openexecutive.memory.session_store.create_session"),
+        patch("openexecutive.memory.session_store.save_message"),
+        patch("openexecutive.memory.session_store.update_session_timestamp"),
+    ):
+        mock_profile.return_value.is_empty.return_value = True
+        mock_exec_instance = MagicMock()
+        mock_exec_instance.chat = AsyncMock(side_effect=_capture)
+        MockExec.return_value = mock_exec_instance
+        MockSession.return_value = MagicMock(seen_channel_refs=set())
+
+        assert current_turn_caller.get() is None  # nothing leaked in from another test
+        await _handle_message(
+            text="hello",
+            discord_user_id="111",
+            discord_channel="999",
+            message_id="abc",
+            thread_id=None,
+            send_fn=AsyncMock(),
+            is_dm=is_dm,
+            session_id="discord:test",
+            session_title="test",
+        )
+        # Reset after the call returns, same as the web chat (issue #50).
+        assert current_turn_caller.get() is None
+
+    assert seen == [TurnCaller(person_id=42, verified=is_dm, surface="discord")]

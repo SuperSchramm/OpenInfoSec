@@ -356,7 +356,7 @@ def test_create_candidate_with_email_refuses_a_non_owner(monkeypatch: pytest.Mon
     from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
 
     eid = _seed()
-    for caller in (TurnCaller(person_id=99, from_web_chat=True), None):
+    for caller in (TurnCaller(person_id=99, verified=True), None):
         token = current_turn_caller.set(caller) if caller is not None else None
         try:
             out = _call(
@@ -380,7 +380,7 @@ def test_create_candidate_with_email_allows_the_owner(monkeypatch: pytest.Monkey
     _stub_store(monkeypatch)
 
     eid = _seed()
-    token = current_turn_caller.set(TurnCaller(person_id=alex, from_web_chat=True))
+    token = current_turn_caller.set(TurnCaller(person_id=alex, verified=True))
     try:
         out = _call(
             handle_create_candidate,

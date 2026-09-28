@@ -234,7 +234,7 @@ async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
             refusal := tool_refusal(
                 "run_workflow",
                 lambda pid: is_principal_or_self(pid, None),
-                "The company-wide briefs are for the company's owner, from the web app.",
+                "The company-wide briefs are for the company's owner.",
             )
         ) is not None:
             return refusal
