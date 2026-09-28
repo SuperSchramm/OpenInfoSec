@@ -518,6 +518,20 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # /mcp is a server-to-server surface (issue #52): its resources return the
+    # whole company's briefing and activity. The UI proxy forwards any path and
+    # stamps `x-caller-email` on every signed-in user, so refuse a request
+    # carrying it; an MCP client holding the shared secret sends none. Registered
+    # before the shared-secret gate so that gate stays outermost (no key: 401 first).
+    @app.middleware("http")
+    async def _mcp_is_server_only(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if (
+            (request.url.path == "/mcp" or request.url.path.startswith("/mcp/"))
+            and (request.headers.get("x-caller-email") or "").strip()
+        ):
+            return JSONResponse({"error": "the MCP endpoint is not available to signed-in users"}, status_code=403)
+        return await call_next(request)
+
     # Shared-secret gate. If BACKEND_SHARED_SECRET is set, every non-exempt
     # request must include a matching x-api-key header. If unset, the gate is
     # off (intended for local dev only — production deploys MUST set it).

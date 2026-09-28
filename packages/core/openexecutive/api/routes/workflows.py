@@ -21,8 +21,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
-from openexecutive.api.routes.chat import require_install_owner
+from openexecutive.api.routes.chat import (
+    caller_is_principal,
+    hidden_workflows_for,
+    require_install_owner,
+)
 from openexecutive.workflows import (
+    COMPANY_WIDE_WORKFLOWS,
     ROSTER_WRITING_WORKFLOWS,
     get_workflow,
     list_workflows,
@@ -61,23 +66,36 @@ async def list_workflow_meta() -> dict[str, Any]:
 
 
 @router.get("/workflows/runs")
-async def list_workflow_runs(workflow: str | None = None, limit: int = 100) -> dict[str, Any]:
-    """Recent runs across all workflows (or filtered by workflow name)."""
+async def list_workflow_runs(
+    request: Request, workflow: str | None = None, limit: int = 100
+) -> dict[str, Any]:
+    """Recent runs across all workflows (or filtered by workflow name).
+
+    The company-wide briefs (issue #52) are listed for the principal only."""
     initialize_runs_db()
-    return {"runs": list_runs(workflow_name=workflow, limit=limit)}
+    return {
+        "runs": list_runs(
+            workflow_name=workflow, limit=limit, exclude_workflows=hidden_workflows_for(request)
+        )
+    }
 
 
 @router.get("/workflows/runs/{run_id}")
-async def get_workflow_run(run_id: str) -> dict[str, Any]:
+async def get_workflow_run(run_id: str, request: Request) -> dict[str, Any]:
     """Full record of one run, including the artifact if complete."""
     run = get_run(run_id)
+    if run is not None and run.get("workflow_name") in hidden_workflows_for(request):
+        run = None  # same 404 as an unknown id
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return run
 
 
 @router.delete("/workflows/runs/{run_id}")
-async def delete_workflow_run(run_id: str) -> dict[str, str]:
+async def delete_workflow_run(run_id: str, request: Request) -> dict[str, str]:
+    run = get_run(run_id)
+    if run is not None and run.get("workflow_name") in hidden_workflows_for(request):
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if not delete_run(run_id):
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return {"status": "deleted", "run_id": run_id}
@@ -198,6 +216,9 @@ async def start_workflow_run(name: str, request: Request) -> StreamingResponse:
     if name in ROSTER_WRITING_WORKFLOWS:
         # Before anything else: it writes People rows (sign-in, email, approvals).
         require_install_owner(request, "run a workflow that changes the People list")
+    if name in COMPANY_WIDE_WORKFLOWS and not caller_is_principal(request):
+        # It summarises everyone's pending proposals: the principal's alone (issue #52).
+        raise HTTPException(status_code=403, detail="Only the principal can run the company-wide briefs")
     try:
         workflow = get_workflow(name)
     except KeyError as e:

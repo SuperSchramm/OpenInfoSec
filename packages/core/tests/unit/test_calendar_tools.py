@@ -507,9 +507,16 @@ def test_cancel_event_marks_reversed() -> None:
 
 
 def test_cancel_nonexistent_returns_error() -> None:
-    with patch("openexecutive.orchestrator.mcp_gateway.get_active_gateway",
-               return_value=_fake_gateway()):
-        raw = asyncio.run(handle_cancel_calendar_event({"decision_instance_id": 9999}))
+    from openexecutive.orchestrator.turn_identity import TurnCaller, current_turn_caller
+
+    owner = _add_person("Owner", "owner@example.com", is_principal=True)
+    token = current_turn_caller.set(TurnCaller(person_id=owner, from_web_chat=True))
+    try:
+        with patch("openexecutive.orchestrator.mcp_gateway.get_active_gateway",
+                   return_value=_fake_gateway()):
+            raw = asyncio.run(handle_cancel_calendar_event({"decision_instance_id": 9999}))
+    finally:
+        current_turn_caller.reset(token)
     assert "error" in json.loads(raw)
 
 

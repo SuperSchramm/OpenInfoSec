@@ -265,3 +265,20 @@ def test_chat_briefing_context_leaves_out_other_peoples_decision_alerts(world: d
     assert "For Sabin" not in rio and "For Alex" not in rio and "Newsletter" in rio
     assert "For Sabin" not in ctx(None) and "Newsletter" in ctx(None)
     assert "For Sabin" in format_open_alerts_for_prompt()  # unscoped default unchanged
+
+
+def test_cancel_tool_answers_a_missing_id_and_someone_elses_the_same_to_a_teammate(world: dict[str, int]) -> None:
+    """Issue #52: a teammate must not be able to tell which decision ids exist."""
+    iid, _ = _decision(world["alex"], "g1")
+    tok = _as(world["rio"])
+    try:
+        mine_not_theirs = _run(handle_cancel_calendar_event({"decision_instance_id": iid}))
+        missing = _run(handle_cancel_calendar_event({"decision_instance_id": 99999}))
+    finally:
+        current_turn_caller.reset(tok)
+    assert mine_not_theirs == missing and missing["status"] == "refused"
+    tok = _as(world["alex"])  # the principal still gets an honest not-found
+    try:
+        assert "not found" in _run(handle_cancel_calendar_event({"decision_instance_id": 99999}))["error"]
+    finally:
+        current_turn_caller.reset(tok)

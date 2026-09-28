@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from openexecutive.alerts.models import Alert
@@ -45,6 +45,7 @@ from openexecutive.alerts.store import (
 from openexecutive.alerts.store import (
     initialize_db as initialize_alerts_db,
 )
+from openexecutive.api.routes.chat import hidden_workflows_for
 from openexecutive.workflows.persistence import (
     delete_run,
     get_run,
@@ -85,7 +86,7 @@ class ArtifactDetail(ArtifactSummary):
 
 @router.get("/artifacts")
 async def list_artifacts(
-    limit: int = _DEFAULT_LIMIT, archived: bool = False
+    request: Request, limit: int = _DEFAULT_LIMIT, archived: bool = False
 ) -> dict[str, list[ArtifactSummary]]:
     """Unified, newest-first list of every artifact the Executive produced.
 
@@ -112,7 +113,8 @@ async def list_artifacts(
             )
         )
 
-    for run in list_artifact_runs(limit=limit, archived=archived):
+    hidden = hidden_workflows_for(request)  # company-wide briefs: the principal's alone (#52)
+    for run in list_artifact_runs(limit=limit, archived=archived, exclude_workflows=hidden):
         items.append(
             ArtifactSummary(
                 id=f"run:{run['run_id']}",
@@ -133,7 +135,7 @@ async def list_artifacts(
 
 
 @router.get("/artifacts/{composite_id}")
-async def get_artifact(composite_id: str) -> ArtifactDetail:
+async def get_artifact(composite_id: str, request: Request) -> ArtifactDetail:
     """One artifact with its full Markdown body, addressed by composite id."""
     kind, native_id = _parse_composite_id(composite_id)
 
@@ -153,7 +155,7 @@ async def get_artifact(composite_id: str) -> ArtifactDetail:
             rationale=alert.suggested_action or None,
         )
 
-    run = _require_artifact_run(native_id, composite_id)
+    run = _require_artifact_run(native_id, composite_id, request)
     return ArtifactDetail(
         id=f"run:{run['run_id']}",
         kind="workflow",
@@ -170,21 +172,21 @@ async def get_artifact(composite_id: str) -> ArtifactDetail:
 
 
 @router.post("/artifacts/{composite_id}/archive")
-async def archive_artifact(composite_id: str) -> dict[str, str]:
+async def archive_artifact(composite_id: str, request: Request) -> dict[str, str]:
     """Soft-hide an artifact (reversible). Drops it from the default list."""
-    _set_artifact_archived(composite_id, archived=True)
+    _set_artifact_archived(composite_id, request, archived=True)
     return {"status": "archived", "id": composite_id}
 
 
 @router.post("/artifacts/{composite_id}/restore")
-async def restore_artifact(composite_id: str) -> dict[str, str]:
+async def restore_artifact(composite_id: str, request: Request) -> dict[str, str]:
     """Un-archive an artifact, returning it to the active list."""
-    _set_artifact_archived(composite_id, archived=False)
+    _set_artifact_archived(composite_id, request, archived=False)
     return {"status": "restored", "id": composite_id}
 
 
 @router.delete("/artifacts/{composite_id}")
-async def delete_artifact(composite_id: str) -> dict[str, str]:
+async def delete_artifact(composite_id: str, request: Request) -> dict[str, str]:
     """Permanently delete the underlying alert / workflow-run row."""
     kind, native_id = _parse_composite_id(composite_id)
     if kind == "alert":
@@ -192,7 +194,7 @@ async def delete_artifact(composite_id: str) -> dict[str, str]:
         assert alert.id is not None  # loaded from DB — id is always set
         delete_alert(alert.id)  # existence already validated above
     else:
-        run = _require_artifact_run(native_id, composite_id)
+        run = _require_artifact_run(native_id, composite_id, request)
         delete_run(run["run_id"])
     return {"status": "deleted", "id": composite_id}
 
@@ -237,17 +239,22 @@ def _require_artifact_alert(native_id: str, composite_id: str) -> Alert:
     return alert
 
 
-def _require_artifact_run(native_id: str, composite_id: str) -> dict[str, Any]:
-    """Load a run-backed artifact or 404. An empty body counts as no artifact."""
+def _require_artifact_run(native_id: str, composite_id: str, request: Request) -> dict[str, Any]:
+    """Load a run-backed artifact or 404. An empty body counts as no artifact, and
+    a company-wide brief counts as none for anyone but the principal (issue #52)."""
     run = get_run(native_id)
-    if run is None or not run.get("artifact"):
+    if (
+        run is None
+        or not run.get("artifact")
+        or run.get("workflow_name") in hidden_workflows_for(request)
+    ):
         raise HTTPException(
             status_code=404, detail=f"Artifact {composite_id!r} not found"
         )
     return run
 
 
-def _set_artifact_archived(composite_id: str, *, archived: bool) -> None:
+def _set_artifact_archived(composite_id: str, request: Request, *, archived: bool) -> None:
     """Archive or restore an artifact, dispatching on the composite-id kind."""
     kind, native_id = _parse_composite_id(composite_id)
     if kind == "alert":
@@ -255,7 +262,7 @@ def _set_artifact_archived(composite_id: str, *, archived: bool) -> None:
         assert alert.id is not None  # loaded from DB — id is always set
         set_alert_archived(alert.id, archived)
     else:
-        run = _require_artifact_run(native_id, composite_id)
+        run = _require_artifact_run(native_id, composite_id, request)
         set_run_archived(run["run_id"], archived)
 
 

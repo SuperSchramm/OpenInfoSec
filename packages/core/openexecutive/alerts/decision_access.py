@@ -42,7 +42,9 @@ def may_handle_alert(caller_person_id: int | None, alert: Any) -> bool:
     return may_see_decision(caller_person_id, alert.routed_to_person_id)
 
 
-def tool_refusal(tool: str, allowed: Callable[[int | None], bool]) -> str | None:
+def tool_refusal(
+    tool: str, allowed: Callable[[int | None], bool], detail: str | None = None
+) -> str | None:
     """The refusal result when this chat turn may not act, else None.
 
     Needs a verified speaker (``orchestrator.turn_identity``: only the signed-in
@@ -62,7 +64,7 @@ def tool_refusal(tool: str, allowed: Callable[[int | None], bool]) -> str | None
             logging.getLogger(__name__).exception("%s: access check failed -- refusing", tool)
     return json.dumps({
         "status": "refused",
-        "detail": (
+        "detail": detail or (
             "That proposal belongs to someone else. Only its owner (the person it was "
             "routed to) or the company's principal can act on it, from the web app."
         ),

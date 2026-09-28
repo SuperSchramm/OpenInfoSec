@@ -871,18 +871,19 @@ async def handle_cancel_calendar_event(tool_input: dict[str, Any]) -> str:
         return json.dumps({"error": "decision_instance_id must be an integer"})
 
     instance = get_decision_instance(instance_id)
-    if instance is None:
-        return json.dumps({"error": f"decision_instance {instance_id} not found"})
 
     # Issue #51: the same rule as POST /decisions/{id}/cancel -- only the
     # principal or the person it was routed to, and only on a verified surface.
+    # Checked before the not-found answer (a missing id counts as the principal's
+    # alone) so a teammate can't tell a missing id from someone else's (issue #52).
     from openexecutive.alerts.decision_access import may_see_decision, tool_refusal
 
-    refused = tool_refusal(
-        "cancel_calendar_event", lambda pid: may_see_decision(pid, instance.approver_person_id)
-    )
+    approver = instance.approver_person_id if instance is not None else None
+    refused = tool_refusal("cancel_calendar_event", lambda pid: may_see_decision(pid, approver))
     if refused is not None:
         return refused
+    if instance is None:
+        return json.dumps({"error": f"decision_instance {instance_id} not found"})
 
     if instance.status not in (
         "approved_unchanged", "approved_with_edit", "executed", "proposed"

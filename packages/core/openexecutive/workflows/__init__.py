@@ -61,6 +61,15 @@ from openexecutive.workflows.role_onboarding import RoleOnboardingWorkflow
 # Add a workflow here if it writes the roster.
 ROSTER_WRITING_WORKFLOWS: frozenset[str] = frozenset({"new_hire_onboarding"})
 
+# Workflows that summarise the whole company's briefing (every person's pending
+# proposals, meeting titles and attendees), and so are the principal's alone to
+# run and to read the stored output of (issue #52). The scheduler runs them
+# in-process and is unaffected. `executive_reflection` reads the same unscoped
+# briefing and also has the outbound tool set, so a teammate must not start it.
+COMPANY_WIDE_WORKFLOWS: frozenset[str] = frozenset(
+    {"morning_brief", "end_of_day_digest", "executive_reflection"}
+)
+
 
 WORKFLOW_REGISTRY: dict[str, Workflow] = {
     "annual_plan": AnnualPlanWorkflow(),

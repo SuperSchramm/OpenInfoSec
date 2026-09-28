@@ -315,6 +315,23 @@ def require_install_owner(request: Request, action: str) -> None:
         raise HTTPException(status_code=403, detail=f"Only the principal can {action}")
 
 
+def caller_is_principal(request: Request) -> bool:
+    """Whether the caller resolves to the principal (a request with no
+    `x-caller-email` does). Unlike `_caller_is_principal_or_unclaimed`, an install
+    with no principal grants nothing: this guards company data, not first setup."""
+    from openexecutive.people import store as people_store
+
+    return people_store.is_principal_or_self(_resolve_caller_person_id(request), None)
+
+
+def hidden_workflows_for(request: Request) -> frozenset[str]:
+    """Workflows whose stored runs this caller may not see (issue #52): the
+    company-wide briefs, for anyone but the principal."""
+    from openexecutive.workflows import COMPANY_WIDE_WORKFLOWS
+
+    return frozenset() if caller_is_principal(request) else COMPANY_WIDE_WORKFLOWS
+
+
 async def _run_chat_turn(
     *,
     message: str,

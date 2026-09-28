@@ -185,7 +185,11 @@ async def handle_list_workflows(tool_input: dict[str, Any]) -> str:
 
 
 async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
-    from openexecutive.workflows import ROSTER_WRITING_WORKFLOWS, get_workflow
+    from openexecutive.workflows import (
+        COMPANY_WIDE_WORKFLOWS,
+        ROSTER_WRITING_WORKFLOWS,
+        get_workflow,
+    )
     from openexecutive.workflows.persistence import (
         complete_run,
         create_run,
@@ -218,6 +222,21 @@ async def handle_run_workflow(tool_input: dict[str, Any]) -> str:
         from openexecutive.orchestrator.people_tools import _refuse_unless_owner
 
         if (refusal := _refuse_unless_owner("run_workflow")) is not None:
+            return refusal
+
+    if name in COMPANY_WIDE_WORKFLOWS:
+        # Summarises everyone's pending proposals: the principal's alone, on a
+        # surface that verified them (issue #52).
+        from openexecutive.alerts.decision_access import tool_refusal
+        from openexecutive.people.store import is_principal_or_self
+
+        if (
+            refusal := tool_refusal(
+                "run_workflow",
+                lambda pid: is_principal_or_self(pid, None),
+                "The company-wide briefs are for the company's owner, from the web app.",
+            )
+        ) is not None:
             return refusal
 
     raw_inputs = tool_input.get("inputs")

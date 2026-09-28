@@ -1252,7 +1252,13 @@ people:
     creates or updates a Person from a placed candidate) can only be started by the
     owner: on POST /workflows/{name}/runs (before the body is read) and through the
     Executive's `start_talent_workflow` and `run_workflow` tools; add a workflow to
-    that set if it writes the roster. And POST /onboard/answer, which completes the
+    that set if it writes the roster. `workflows.COMPANY_WIDE_WORKFLOWS` (issue
+    #52: `morning_brief`, `end_of_day_digest`, `executive_reflection`) summarise everyone's pending proposals,
+    so they are the principal's alone to run (403 on the route, refusal from the
+    `run_workflow` tool on a verified web chat) and to read: their stored runs are
+    hidden from GET /workflows/runs and 404 on GET/DELETE /workflows/runs/{id} for
+    anyone else (and from the /artifacts gallery: list, detail, archive, restore,
+    delete); the scheduler runs them in-process and is unaffected. And POST /onboard/answer, which completes the
     setup wizard (People rows with emails, a second principal row, the company
     profile), needs the owner once a principal exists; a fresh install can still
     run it. As defence in depth the new-hire workflow's person matching also never
@@ -2941,6 +2947,12 @@ integrations:
     transport, mounted into the FastAPI app at `/mcp` (streamable_http_path="/"
     mounted under "/mcp" so the external endpoint is exactly `/mcp`; compliant
     clients follow the trailing-slash 307 to `/mcp/`).
+
+    Access (issue #52): /mcp is a server-to-server surface. Its resources return the
+    whole company's briefing and activity, and the UI proxy forwards any path with
+    the shared secret, so a middleware in api/main.py answers 403 to any /mcp request
+    carrying `x-caller-email` (the proxy stamps it on every signed-in user and strips
+    a client-supplied one). An MCP client holding the shared secret sends none.
 
     Lifespan INVARIANT: mounting a sub-app does NOT run its lifespan, so
     api/main.py wraps the serving phase in `mcp.session_manager.run()`. Without

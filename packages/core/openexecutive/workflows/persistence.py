@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -142,8 +143,10 @@ def list_runs(
     limit: int = 100,
     db_path: Path | None = None,
     status: str | None = None,
+    exclude_workflows: Collection[str] = (),
 ) -> list[dict[str, Any]]:
-    """Recent runs, newest-updated first. `workflow_name` and `status` are
+    """Recent runs, newest-updated first. `exclude_workflows` drops those
+    workflows in SQL, for the same no-starvation reason as `status`. `workflow_name` and `status` are
     optional SQL filters — pushing `status` into the query (rather than letting
     callers filter the returned page) ensures a `status='done'` caller isn't
     starved when the most-recent `limit` rows are dominated by running/awaiting
@@ -158,6 +161,9 @@ def list_runs(
     if status:
         clauses.append("status = ?")
         params.append(status)
+    if exclude_workflows:
+        clauses.append(f"workflow_name NOT IN ({','.join('?' * len(exclude_workflows))})")
+        params.extend(exclude_workflows)
     where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
     params.append(limit)
     with _get_conn(_resolve(db_path)) as conn:
@@ -173,6 +179,7 @@ def list_artifact_runs(
     limit: int = 200,
     db_path: Path | None = None,
     archived: bool = False,
+    exclude_workflows: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """Completed runs that produced an artifact, newest first.
 
@@ -192,15 +199,20 @@ def list_artifact_runs(
     archived_clause = (
         "AND archived_at IS NOT NULL" if archived else "AND archived_at IS NULL"
     )
+    exclude_clause = (
+        f"AND workflow_name NOT IN ({','.join('?' * len(exclude_workflows))}) "
+        if exclude_workflows
+        else ""
+    )
     with _get_conn(_resolve(db_path)) as conn:
         rows = conn.execute(
             "SELECT run_id, workflow_name, title, status, created_at, updated_at, "
             "archived_at "
             "FROM workflow_runs "
             "WHERE artifact IS NOT NULL AND artifact != '' AND status = 'done' "
-            f"{archived_clause} "
+            f"{archived_clause} {exclude_clause}"
             "ORDER BY created_at DESC LIMIT ?",
-            (limit,),
+            (*exclude_workflows, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
