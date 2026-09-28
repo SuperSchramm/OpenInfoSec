@@ -367,3 +367,17 @@ def test_server_side_sign_in_hook_can_still_write(client: TestClient) -> None:
 def test_audit_log_fields_are_bounded(client: TestClient, extra: dict) -> None:
     body = {"event_type": "auth_login", "summary": "ok", **extra}
     assert client.post("/audit/log", json=body).status_code == 422
+
+
+# --- session_id shape on GET /audit/sessions/{id} (issue #44) ------------------
+
+def test_audit_session_rejects_a_trailing_newline_id(client: TestClient) -> None:
+    """`$` (unlike `\\Z`) matches just before a trailing newline, so a naive
+    `.match()` would let this through -- must be `.fullmatch()` under the hood."""
+    resp = client.get("/audit/sessions/s1%0A", headers=ALEX)
+    assert resp.status_code == 400
+
+
+def test_audit_session_rejects_an_embedded_control_character(client: TestClient) -> None:
+    resp = client.get("/audit/sessions/s1%0Aforged-log-line", headers=ALEX)
+    assert resp.status_code == 400

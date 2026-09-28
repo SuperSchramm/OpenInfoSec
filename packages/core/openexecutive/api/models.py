@@ -50,7 +50,11 @@ class PageContext(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=32000)
-    session_id: str | None = None
+    # Loosely bounded here (real ids are far shorter -- see
+    # memory.session_store.SESSION_ID_RE); the shape check that actually
+    # matters happens in chat._clean_session_id, which drops anything
+    # implausible rather than 400ing (issue #44).
+    session_id: str | None = Field(default=None, max_length=512)
     # Per-message opt-in: when true, route through Committee adversarial
     # review before streaming the (revised) response to the client.
     committee_review: bool = False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,24 @@ from typing import Any
 from openexecutive.memory.episodic import _get_conn, get_episodic_db_path
 
 DB_PATH = get_episodic_db_path()
+
+# A session id reaches every audit and usage row a turn produces, and the log
+# lines chat.py emits about it (chat.session_refused, chat.session_id_reserved,
+# ...), so an unconstrained value is a log-injection vector (a newline forges a
+# log record) and makes cross-caller collisions trivial to engineer. Wide
+# enough for every real shape this app mints or accepts: a web uuid4, and the
+# channel-namespaced ids adapters build (`slack:thread:C1:1700000000.001`,
+# `email:x@host`). Shared by chat.py (client-supplied ids) and audit.py (the
+# session_id query filter) so the charset can't drift between the write and
+# read side (issue #44; ported from upstream SenteLabsAI/OpenExecutive).
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_:@\-.+/=]{1,256}$")
+
+
+def is_valid_session_id(session_id: str) -> bool:
+    # fullmatch, not match: `$` (unlike `\Z`) also matches just before a single
+    # trailing newline, so `.match()` alone would let "abc\n" through -- the
+    # exact log-injection shape this check exists to keep out (found by review).
+    return bool(SESSION_ID_RE.fullmatch(session_id))
 
 
 def _resolve_db_path(db_path: Path | None) -> Path:

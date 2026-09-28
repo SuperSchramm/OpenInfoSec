@@ -11,7 +11,6 @@ re-deriving causality from event types client-side.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -24,8 +23,11 @@ from openexecutive.audit.logger import EVENT_TYPES
 # "slack:C123:1700000000.001", "telegram:5556677", "email:thread@host"). They
 # come from third-party webhooks, so reflecting an unvalidated value into the
 # response body would let an attacker shape stored XSS via a malformed inbound.
-# 256 chars is generous (longest observed in practice is ~80).
-_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_:@\-\.\+/=]{1,256}$")
+# Shared with chat.py (issue #44), which validates the same shape on the write
+# side, so the charset can't drift between what's accepted and what's readable.
+# Go through the shared helper, not the raw regex, so a `.match()`-vs-
+# `.fullmatch()` mistake (a trailing newline sneaking past `$`) can't recur here.
+from openexecutive.memory.session_store import is_valid_session_id as _is_valid_session_id
 
 router = APIRouter()
 
@@ -519,7 +521,7 @@ def get_audit_session(session_id: str, request: Request) -> AuditSessionResponse
     a runaway agent session would clip the tail rather than OOM the API.
     """
     _require_principal(request)
-    if not _SESSION_ID_RE.match(session_id):
+    if not _is_valid_session_id(session_id):
         raise HTTPException(status_code=400, detail="invalid session_id format")
     audit = _resolve_logger(request)
     events = audit.query(session_id=session_id, limit=1000)

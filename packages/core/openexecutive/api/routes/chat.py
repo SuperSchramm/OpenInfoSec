@@ -35,6 +35,26 @@ _sessions: dict[str, Any] = {}
 _TITLE_MAX_LEN = 60
 
 
+def _clean_session_id(session_id: str | None) -> str | None:
+    """Drop a client-supplied session id that isn't a plausible id (issue #44).
+
+    Dropped rather than rejected with a 4xx: a malformed id is indistinguishable
+    from a stale client (an old cached id from before this check existed, or a
+    client bug), and minting a fresh session keeps the turn working while
+    denying the caller a chosen audit key -- a newline or an oversized value
+    would otherwise reach the chat.session_refused / chat.session_id_reserved
+    log lines and every audit/usage row the turn produces. Ported from upstream
+    SenteLabsAI/OpenExecutive's `_clean_session_id`."""
+    from openexecutive.memory.session_store import is_valid_session_id
+
+    if session_id is None:
+        return None
+    if not is_valid_session_id(session_id):
+        logger.warning("chat.session_id_rejected len=%d", len(session_id))
+        return None
+    return session_id
+
+
 def _get_or_create_session(session_id: str | None, request: Request) -> Any:
     from openexecutive.memory.session_store import load_messages
     from openexecutive.onboarding.profile_builder import load_or_create_profile
@@ -151,6 +171,23 @@ def _resolve_caller_person_id(request: Request) -> int | None:
 # every ownerless session to every unresolved caller. In-memory like
 # `_sessions`, so it does not survive a restart.
 _session_starters: dict[str, frozenset[str]] = {}
+
+# Upper bound on _session_starters (issue #44). It is only pruned on delete
+# (forget_session), so a long-running process talking to many one-off/orphaned
+# chats -- every _select_requested_session claim, not just real conversations
+# -- would otherwise grow it without limit. Dict insertion order lets the
+# oldest entry be evicted cheaply; losing it only demotes a very old chat's
+# access back to "orphaned" for its own starter (an already-handled path, not
+# a crash) -- it never grants access to anyone it didn't already grant it to.
+_SESSION_STARTERS_MAX = 50_000
+
+
+def _remember_starter(session_id: str, keys: frozenset[str]) -> None:
+    if session_id not in _session_starters and len(_session_starters) >= _SESSION_STARTERS_MAX:
+        oldest = next(iter(_session_starters))
+        _session_starters.pop(oldest, None)
+    _session_starters.setdefault(session_id, keys)
+
 
 SessionAccess = Literal["missing", "allowed", "forbidden", "orphaned"]
 
@@ -368,6 +405,10 @@ async def _run_chat_turn(
     from openexecutive.memory.session_store import create_session
     from openexecutive.orchestrator.executive import Executive
 
+    # Clean before anything below touches it (_select_requested_session,
+    # _get_or_create_session, every log line and audit row this turn produces).
+    session_id = _clean_session_id(session_id)
+
     t0 = time.monotonic()
     turn_id = uuid.uuid4().hex
     collector = DebugCollector(t0=t0, turn_id=turn_id)
@@ -383,7 +424,7 @@ async def _run_chat_turn(
 
     session = _get_or_create_session(requested_id, request)
     if access == "missing":
-        _session_starters.setdefault(session.session_id, _caller_keys(request, caller_person_id))
+        _remember_starter(session.session_id, _caller_keys(request, caller_person_id))
     is_first_turn = len(session.conversation_history) == 0
 
     logger.info(
@@ -793,7 +834,7 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
 async def chat_upload(
     request: Request,
     message: str = Form(..., min_length=1, max_length=32000),
-    session_id: str | None = Form(None),
+    session_id: str | None = Form(None, max_length=512),
     committee_review: bool = Form(False),
     files: list[UploadFile] = File(...),  # noqa: B008 — FastAPI multipart marker, mirrors the pattern for File parameters
 ) -> StreamingResponse:

@@ -1520,11 +1520,29 @@ chat:
     deleted id. Claiming an unused bare id also deletes any messages already
     stored under it (orphans from a delete/reset race or from before this check),
     so they are never loaded as the claimant's history. DELETE also evicts the
-    in-memory Session so the id cannot resume its history. Known gap, not
-    covered: GET /audit/sessions/{id} is not owner-scoped. (GET /debug/last-turn,
-    which leaked the last turn to any caller, was removed.) Ported from upstream
-    SenteLabsAI/OpenExecutive cf61609, adapted to this codebase (no feedback or
-    follow-up routes here).
+    in-memory Session so the id cannot resume its history. (GET /debug/last-turn,
+    which leaked the last turn to any caller, was removed. GET /audit/sessions/{id}
+    is principal-only, see audit.access below -- issue #43, fixed after this note
+    was first written.) Ported from upstream SenteLabsAI/OpenExecutive cf61609,
+    adapted to this codebase (no feedback or follow-up routes here).
+
+    Shape (issue #44): `chat._clean_session_id` drops a client-supplied id that
+    isn't `memory.session_store.SESSION_ID_RE` (`^[A-Za-z0-9_:@\-.+/=]{1,256}$`,
+    generous enough for a web uuid4 and every channel-namespaced shape) before it
+    reaches anything above -- the DB, `_sessions`, `_session_starters`, or the
+    `chat.session_refused` / `chat.session_id_reserved` log lines a raw newline or
+    an oversized value would otherwise forge or pollute. Dropped, not 400ed: a
+    fresh session is minted so the turn still works. `ChatRequest.session_id` and
+    the `/chat/upload` Form field also carry a loose `max_length=512` so a huge
+    string never reaches the regex. The same `SESSION_ID_RE` gates
+    `GET /audit/sessions/{id}`'s path parameter (api/routes/audit.py), so the
+    write- and read-side charsets can't drift apart. `_session_starters` is capped
+    at `_SESSION_STARTERS_MAX` (50k) with oldest-first eviction (dict insertion
+    order) -- it was only pruned on delete, so a long-running process would
+    otherwise grow it without limit; losing an entry only demotes a very old
+    chat's access to "orphaned" for its own starter, never grants access to
+    anyone else. Ported from upstream SenteLabsAI/OpenExecutive's
+    `_clean_session_id`.
 
 audit:
   purpose: Persistent, searchable record of valuable events. Separate from episodic memory (which biases future LLM behaviour) — audit is for humans to inspect what the system did.
