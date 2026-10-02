@@ -25,6 +25,7 @@ from openexecutive.memory.episodic import (
     reschedule_action,
 )
 from openexecutive.orchestrator.mcp_gateway import MCPGateway
+from openexecutive.orchestrator.store_access import get_store_generation
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +128,25 @@ async def run_scheduler(
             due = claim_due_actions(now)
             if due:
                 logger.info("scheduler: %d due action(s)", len(due))
+            # Issue #55: snapshot the swap generation HERE, synchronously,
+            # before any task is scheduled onto the event loop — same
+            # "before scheduling, not inside the task" discipline as issue
+            # #54's `today._attach_narrative` (`get_store_generation()`
+            # passed into `background_tasks.add_task`, not read inside the
+            # task body). Capturing later (e.g. at the top of
+            # `_run_principal_brief`/`_run_dynamic_workflow`) would already
+            # be too late: `asyncio.create_task` only schedules the
+            # coroutine to start on a future loop iteration, and another
+            # ready callback (e.g. an in-flight fixture-swap request
+            # handler) can run first and complete a swap before this task
+            # gets its first chance to run — at which point a capture taken
+            # inside the task would already reflect the post-swap
+            # generation and the mismatch would never be detected.
+            expected_generation = get_store_generation()
             for row in due:
-                task = asyncio.create_task(_execute_action(row, gateway))
+                task = asyncio.create_task(
+                    _execute_action(row, gateway, expected_generation)
+                )
                 _inflight.add(task)
                 task.add_done_callback(_inflight.discard)
         except asyncio.CancelledError:
@@ -143,9 +161,24 @@ async def run_scheduler(
 
 
 async def _execute_action(
-    action: ScheduledAction, gateway: MCPGateway | None
+    action: ScheduledAction,
+    gateway: MCPGateway | None,
+    expected_generation: int,
 ) -> None:
-    """Run one due action: build context, ask the Executive to deliver it."""
+    """Run one due action: build context, ask the Executive to deliver it.
+
+    `expected_generation` (issue #55): the swap generation the caller
+    captured at claim time, threaded through to the two handlers
+    (`_run_principal_brief`, `_run_dynamic_workflow`) whose delivery step
+    must not fire using a company swapped in mid-run — see
+    `run_scheduler`'s claim-time snapshot for why it must be captured there,
+    not here or later. Required (no default): a round-1 review of this fix
+    found that defaulting it to a capture-on-entry fallback would silently
+    downgrade the guard to the weaker, already-too-late capture point if a
+    future refactor ever dropped the argument at the one production call
+    site — a required parameter turns that regression into an immediate
+    `TypeError` instead.
+    """
     if action.id is None:
         logger.error("scheduler: action missing id, skipping")
         return
@@ -325,7 +358,7 @@ async def _execute_action(
     # Specialised __internal__ action; handled before the generic fallback.
     # ------------------------------------------------------------------
     if action.kind == "dynamic_workflow":
-        await _run_dynamic_workflow(action, now)
+        await _run_dynamic_workflow(action, now, expected_generation)
         return
 
     # ------------------------------------------------------------------
@@ -675,7 +708,7 @@ async def _execute_action(
     # circuit because the brief rows use channel="__internal__" too.
     # ------------------------------------------------------------------
     if action.kind in ("principal_brief_morning", "principal_brief_eod"):
-        await _run_principal_brief(action, now)
+        await _run_principal_brief(action, now, expected_generation)
         return
 
     # ------------------------------------------------------------------
@@ -1285,18 +1318,26 @@ async def _run_onboarding_checkin(action: ScheduledAction, now: datetime) -> Non
     mark_action_done(action.id)
 
 
-async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
+async def _run_dynamic_workflow(
+    action: ScheduledAction, now: datetime, expected_generation: int
+) -> None:
     """Run a cadence-fired user-created workflow and DM its artifact.
 
     Mirrors ``_run_principal_brief``: always chain the next occurrence + mark
     the row done, even on failure, so one bad run can't break the cadence.
     The workflow ``name`` is in ``channel_ref``; the delivery recipient is
     ``assigned_to_person_id`` (set by ``dynamic_cadence``).
+
+    `expected_generation` (issue #55): the swap generation the CALLER
+    captured at claim time (``run_scheduler``, before this coroutine was
+    even scheduled onto the event loop) — not captured here, since by the
+    time this function's own body runs a swap may already have landed in
+    the gap between task creation and first execution.
     """
     import contextlib
     import uuid
 
-    from openexecutive.orchestrator.store_access import get_shared_store
+    from openexecutive.orchestrator.store_access import get_shared_store, get_store_generation
     from openexecutive.workflows import get_workflow
     from openexecutive.workflows.dynamic_cadence import (
         schedule_dynamic_workflow_cadence,
@@ -1315,6 +1356,7 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
         return
 
     run_id = str(uuid.uuid4())
+    swapped = False
     try:
         workflow = get_workflow(name)
         wf_inputs = workflow.input_model()()  # cadence runs supply no inputs
@@ -1335,7 +1377,20 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
             # A WaitForHumanEvent (approval gate) has no `type`; a cadence run
             # can't pause for a human, so we ignore the gate and finish with
             # whatever was assembled.
-        complete_run(run_id, artifact or "(no artifact)")
+        swapped = get_store_generation() != expected_generation
+        if swapped:
+            logger.info(
+                "scheduler: store generation changed mid-run for dynamic_workflow "
+                "%r (action %d) — a company swap or an attachment purge landed "
+                "while the workflow was running; attempting to mark the run "
+                "stale (best-effort — the run row may already be gone from "
+                "the live DB after certain swap types) and skipping delivery",
+                name, action.id,
+            )
+            with contextlib.suppress(Exception):
+                fail_run(run_id, "stale: store generation changed mid-run")
+        else:
+            complete_run(run_id, artifact or "(no artifact)")
     except Exception as exc:
         logger.exception("scheduler: dynamic_workflow %r (action %d) failed", name, action.id)
         with contextlib.suppress(Exception):
@@ -1344,7 +1399,7 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
         # Deliver AFTER the run is marked done, in its own guard — a delivery
         # failure (e.g. revoked token) must not regress a successfully
         # produced-and-stored artifact's status back to 'error'.
-        if artifact and action.assigned_to_person_id is not None:
+        if not swapped and artifact and action.assigned_to_person_id is not None:
             try:
                 from openexecutive.orchestrator.schedule_tools import (
                     handle_message_person,
@@ -1363,17 +1418,24 @@ async def _run_dynamic_workflow(action: ScheduledAction, now: datetime) -> None:
     schedule_dynamic_workflow_cadence(defn, after=datetime.now(UTC))
 
 
-async def _run_principal_brief(action: ScheduledAction, now: datetime) -> None:
+async def _run_principal_brief(
+    action: ScheduledAction, now: datetime, expected_generation: int
+) -> None:
     """Run the matching brief workflow and dispatch the artifact to the principal.
 
     Chains the next occurrence 24h forward regardless of delivery outcome
     — a single failed brief shouldn't break the recurring rhythm. Mirrors
     the dept_cadence handler's pattern.
+
+    `expected_generation` (issue #55): the swap generation the CALLER
+    captured at claim time — see `_run_dynamic_workflow`'s docstring for why
+    it isn't captured in here instead.
     """
+    import contextlib
     import uuid
 
     from openexecutive.audit import log_event as audit_log
-    from openexecutive.orchestrator.store_access import get_shared_store
+    from openexecutive.orchestrator.store_access import get_shared_store, get_store_generation
     from openexecutive.workflows import WORKFLOW_REGISTRY
     from openexecutive.workflows.persistence import (
         complete_run,
@@ -1392,6 +1454,7 @@ async def _run_principal_brief(action: ScheduledAction, now: datetime) -> None:
     input_cls = workflow.input_model()
     wf_inputs = input_cls()
     run_id = str(uuid.uuid4())
+    swapped = False
 
     try:
         create_run(
@@ -1405,31 +1468,53 @@ async def _run_principal_brief(action: ScheduledAction, now: datetime) -> None:
                 artifact = event.content
             elif event.type == "error" and event.message:
                 raise RuntimeError(event.message)
-        complete_run(run_id, artifact or "(no artifact)")
 
-        if artifact:
-            ok, detail = await _deliver_to_principal(artifact)
-            if ok:
-                logger.info("scheduler: %s delivered (%s)", kind, detail)
-                audit_log(
-                    "scheduled_action",
-                    f"{kind} delivered ({detail})",
-                    actor="scheduler",
-                    details={"phase": "delivered", "kind": kind, "channel_detail": detail},
-                )
-            else:
-                logger.warning("scheduler: %s NOT delivered — %s", kind, detail)
-                audit_log(
-                    "scheduled_action",
-                    f"{kind} NOT delivered — {detail}",
-                    actor="scheduler",
-                    details={"phase": "delivery_failed", "kind": kind, "reason": detail},
-                )
+        swapped = get_store_generation() != expected_generation
+        if swapped:
+            logger.info(
+                "scheduler: store generation changed mid-run for %s (action %d) "
+                "— a company swap or an attachment purge landed while the "
+                "workflow was running; attempting to mark the run stale "
+                "(best-effort — the run row may already be gone from the "
+                "live DB after certain swap types) and skipping delivery",
+                kind, action.id,
+            )
+            with contextlib.suppress(Exception):
+                fail_run(run_id, "stale: store generation changed mid-run")
+        else:
+            complete_run(run_id, artifact or "(no artifact)")
     except Exception as exc:
         logger.exception("scheduler: %s (action %d) failed", kind, action.id)
-        import contextlib
         with contextlib.suppress(Exception):
             fail_run(run_id, str(exc))
+    else:
+        # Deliver AFTER the run is marked done, in its own guard — a
+        # delivery (or audit-log) failure must not regress a successfully
+        # produced-and-stored artifact's status back to 'error'. Mirrors
+        # _run_dynamic_workflow's pattern.
+        if not swapped and artifact:
+            try:
+                ok, detail = await _deliver_to_principal(artifact)
+                if ok:
+                    logger.info("scheduler: %s delivered (%s)", kind, detail)
+                    audit_log(
+                        "scheduled_action",
+                        f"{kind} delivered ({detail})",
+                        actor="scheduler",
+                        details={"phase": "delivered", "kind": kind, "channel_detail": detail},
+                    )
+                else:
+                    logger.warning("scheduler: %s NOT delivered — %s", kind, detail)
+                    audit_log(
+                        "scheduled_action",
+                        f"{kind} NOT delivered — {detail}",
+                        actor="scheduler",
+                        details={"phase": "delivery_failed", "kind": kind, "reason": detail},
+                    )
+            except Exception:
+                logger.exception(
+                    "scheduler: %s delivery failed (run still complete)", kind
+                )
 
     # Always chain the next occurrence + mark this row done, so a single
     # bad brief doesn't kill the recurring rhythm. Worst case the next

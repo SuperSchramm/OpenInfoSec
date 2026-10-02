@@ -19,6 +19,7 @@ from openexecutive.memory.episodic import (
     initialize_db,
     insert_scheduled_action,
 )
+from openexecutive.orchestrator import store_access
 from openexecutive.scheduler.runner import _execute_action, run_scheduler
 
 
@@ -70,7 +71,12 @@ def test_execute_action_marks_done_on_success(
     )
     claimed = claim_due_actions(datetime.now(UTC))
     assert len(claimed) == 1
-    asyncio.run(_execute_action(claimed[0], gateway=None))
+    asyncio.run(
+        _execute_action(
+            claimed[0], gateway=None,
+            expected_generation=store_access.get_store_generation(),
+        )
+    )
 
     stored = get_scheduled_action(action_id)
     assert stored is not None
@@ -88,7 +94,12 @@ def test_execute_action_retries_on_exception(
         intent_text="say hi",
     )
     claimed = claim_due_actions(datetime.now(UTC))
-    asyncio.run(_execute_action(claimed[0], gateway=None))
+    asyncio.run(
+        _execute_action(
+            claimed[0], gateway=None,
+            expected_generation=store_access.get_store_generation(),
+        )
+    )
 
     stored = get_scheduled_action(action_id)
     assert stored is not None
@@ -110,7 +121,12 @@ def test_email_channel_without_gateway_short_circuits(
         intent_text="follow up",
     )
     claimed = claim_due_actions(datetime.now(UTC))
-    asyncio.run(_execute_action(claimed[0], gateway=None))
+    asyncio.run(
+        _execute_action(
+            claimed[0], gateway=None,
+            expected_generation=store_access.get_store_generation(),
+        )
+    )
 
     stored = get_scheduled_action(action_id)
     assert stored is not None
@@ -154,7 +170,9 @@ def test_scheduler_holds_due_actions_when_no_company_profile(
     _set_profile_active(monkeypatch, active=False)
     dispatched: list[int | None] = []
 
-    async def _recording_execute(action: ScheduledAction, gateway: object) -> None:
+    async def _recording_execute(
+        action: ScheduledAction, gateway: object, expected_generation: int | None = None
+    ) -> None:
         dispatched.append(action.id)
 
     monkeypatch.setattr(
@@ -194,7 +212,9 @@ def test_scheduler_dispatches_due_actions_when_company_profile_active(
     async def _scenario() -> None:
         ready = asyncio.Event()
 
-        async def _recording_execute(action: ScheduledAction, gateway: object) -> None:
+        async def _recording_execute(
+            action: ScheduledAction, gateway: object, expected_generation: int | None = None
+        ) -> None:
             dispatched.append(action.id)
             ready.set()
 

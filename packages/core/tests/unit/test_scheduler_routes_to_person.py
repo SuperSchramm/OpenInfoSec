@@ -13,6 +13,7 @@ from openexecutive.departments import registry as dept_registry
 from openexecutive.departments import store as dept_store
 from openexecutive.departments.models import AuthorityLevel
 from openexecutive.memory import episodic
+from openexecutive.orchestrator import store_access
 from openexecutive.people import registry as people_registry
 from openexecutive.people import store as people_store
 from openexecutive.people.models import AuthorityScope, AvailabilityWindow
@@ -91,7 +92,12 @@ def test_propose_only_creates_alert_no_dispatch() -> None:
         "openexecutive.orchestrator.executive.Executive.chat",
         new_callable=AsyncMock,
     ) as mock_chat:
-        asyncio.run(_execute_action(action, gateway=None))
+        asyncio.run(
+            _execute_action(
+                action, gateway=None,
+                expected_generation=store_access.get_store_generation(),
+            )
+        )
 
     # Executive.chat must NOT have been called.
     mock_chat.assert_not_called()
@@ -135,7 +141,12 @@ def test_propose_only_outside_window_reschedules() -> None:
         "openexecutive.orchestrator.executive.Executive.chat",
         new_callable=AsyncMock,
     ):
-        asyncio.run(_execute_action(action, gateway=None))
+        asyncio.run(
+            _execute_action(
+                action, gateway=None,
+                expected_generation=store_access.get_store_generation(),
+            )
+        )
 
     # Action should be rescheduled back to pending with a future run_at.
     updated = episodic.get_scheduled_action(action.id)
@@ -155,7 +166,12 @@ def test_internal_channel_bypasses_dispatch() -> None:
         "openexecutive.orchestrator.executive.Executive.chat",
         new_callable=AsyncMock,
     ) as mock_chat:
-        asyncio.run(_execute_action(action, gateway=None))
+        asyncio.run(
+            _execute_action(
+                action, gateway=None,
+                expected_generation=store_access.get_store_generation(),
+            )
+        )
 
     mock_chat.assert_not_called()
 
@@ -188,7 +204,12 @@ def test_auto_execute_dispatches() -> None:
         "openexecutive.memory.episodic.format_for_prompt",
         return_value="",
     ):
-        asyncio.run(_execute_action(action, gateway=None))
+        asyncio.run(
+            _execute_action(
+                action, gateway=None,
+                expected_generation=store_access.get_store_generation(),
+            )
+        )
 
     # Executive.chat should have been called (auto_execute dispatches).
     mock_chat.assert_called_once()
@@ -223,7 +244,12 @@ def test_escalate_creates_alert_and_dispatches() -> None:
         "openexecutive.memory.episodic.format_for_prompt",
         return_value="",
     ):
-        asyncio.run(_execute_action(action, gateway=None))
+        asyncio.run(
+            _execute_action(
+                action, gateway=None,
+                expected_generation=store_access.get_store_generation(),
+            )
+        )
 
     # Alert should have been created (escalate creates a proposal alert).
     alerts = alert_store.list_alerts()
@@ -258,6 +284,11 @@ def test_no_department_bypasses_gate() -> None:
         "openexecutive.memory.episodic.format_for_prompt",
         return_value="",
     ):
-        asyncio.run(_execute_action(action, gateway=None))
+        asyncio.run(
+            _execute_action(
+                action, gateway=None,
+                expected_generation=store_access.get_store_generation(),
+            )
+        )
 
     mock_chat.assert_called_once()

@@ -1444,6 +1444,87 @@ scheduler:
     /scheduled/{id} cancels a pending action. The Pulse page's Cadence section
     uses this: one status filter (pending/done/failed/cancelled/all) governs all
     rhythm groups, fetching asc for pending and desc for terminal statuses.
+  swap_guard: |
+    Issue #55 closes the "unguarded post-await delivery" gap for the two
+    handlers whose outbound action is a single step AFTER their workflow run
+    completes: `_run_principal_brief` (morning_brief / end_of_day_digest —
+    `complete_run` + `_deliver_to_principal`) and `_run_dynamic_workflow`
+    (`complete_run` + `handle_message_person`).
+
+    Capture point: `run_scheduler`'s poll loop snapshots
+    `orchestrator.store_access.get_store_generation()` synchronously, right
+    after `claim_due_actions` and BEFORE any `asyncio.create_task` for that
+    tick — not inside the handler. A round-1 review of this fix caught that
+    capturing later (e.g. at the top of `_run_principal_brief` itself) is
+    already too late: `asyncio.create_task` only schedules a coroutine to
+    start on a future loop iteration, and another ready callback (e.g. an
+    in-flight fixture-swap request handler) can run first and complete a
+    swap before the scheduled task gets its first chance to run, at which
+    point a capture taken inside the task would already reflect the
+    post-swap generation and the mismatch would never be detected. The
+    snapshot is threaded down through `_execute_action`'s REQUIRED
+    `expected_generation` parameter into both handlers, which re-check it
+    once right after their `async for event in workflow.run(...)` loop
+    finishes. No default: a round-2 review flagged that defaulting the
+    parameter to a capture-on-entry fallback (as an earlier draft of this
+    fix did) would silently downgrade the guard to that weaker, later
+    capture point if a future refactor ever dropped the argument at the one
+    production call site (`run_scheduler`) — requiring it turns that
+    regression into an immediate `TypeError` instead of a silent, untested
+    reversion. Same defence, same "capture before scheduling, not inside the
+    task" discipline, as issue #54's
+    `today._attach_narrative`/`_regen_briefing_narrative`/`_regen_stale_insights`.
+
+    On a mismatch (a company swap — fixture load/unload, reset, a
+    client-slot switch — OR an admin attachment purge, `delete_attachment_docs`,
+    bumps the same counter and is indistinguishable from a swap here) the
+    handler skips `complete_run` and the delivery entirely, rather than
+    DMing/persisting the OUTGOING company's artifact into whatever is now
+    live — this is the guarantee the issue asked for and it is unconditional.
+    It ALSO makes a best-effort `fail_run(run_id, "stale: store generation
+    changed mid-run")` call (wrapped in `contextlib.suppress(Exception)`),
+    but this is bookkeeping only, not a guarantee: a real company swap can
+    replace the on-disk DB file the `run_id` row lives in (`clients/slots.py`
+    backs up a different file over the live path), so the `UPDATE ... WHERE
+    run_id = ?` may find zero rows (harmless no-op — same shape as issue
+    #58's framing for `scheduled_actions`) or, after a full reset, hit a
+    freshly-initialized DB with no `workflow_runs` table at all (the
+    `suppress` exists for that case) — either way the outgoing run can be
+    left stranded at status='running' in its own backed-up file. Delivery
+    (and, in `_run_principal_brief`, the audit-log calls) is wrapped in its
+    own inner try/except in an `else` clause of the outer try/except — a
+    delivery or audit-log failure must not regress an already-`complete_run`
+    row back to `error`.
+
+    `mark_action_done` and the next-occurrence chain
+    (`_enqueue_next_principal_brief` / `schedule_dynamic_workflow_cadence`)
+    still run unconditionally on a mismatch — deliberately unguarded, so one
+    swap can't stall the recurring cadence; the resulting risk of that
+    bookkeeping write landing in the wrong company's DB post-swap is tracked
+    separately (issue #58), not closed here.
+
+    Known, tracked gaps this fix does NOT close (each filed as its own issue
+    rather than folded in):
+      - `_run_executive_reflection` fires its outbound tool calls (messages,
+        broadcasts — see `agents:` → `COMPANY_WIDE_WORKFLOWS`) directly
+        DURING the run via its own tool-dispatch loop, not in a single
+        post-await step this handler controls — a swap landing BETWEEN two
+        of its own tool calls needs the guard inside that dispatch loop
+        (issue #56).
+      - `watchlist_research_scan` (the `executive_research` workflow) has
+        the same in-loop delivery shape as #56, PLUS deletes/re-ingests the
+        `recent_research` Chroma collection through a `store` handle
+        captured at run start — a swap mid-run can write the OUTGOING
+        company's scraped research into the INCOMING company's persistent,
+        retrievable knowledge base (issue #57, HIGH: a poisoning vector, not
+        just stale UI).
+      - `mark_action_done`/the chain-next calls across every recurring kind
+        write via a plain autoincrement `action.id` with no company scoping;
+        a swap landing before that write (post fixture load/unload, which
+        preserves `scheduled_actions` history unlike the full-reset paths)
+        can mark a different action done or chain a bogus next-occurrence
+        row in the now-live company (issue #58, MEDIUM: scheduler bookkeeping
+        corruption, not a confidentiality leak).
 
 today:
   module: openexecutive.api.routes.today
