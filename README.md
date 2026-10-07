@@ -1,36 +1,71 @@
-# Open Executive
+# OpenInfoSec
 
-[![CI](https://github.com/SenteLabsAI/OpenExecutive/actions/workflows/ci.yml/badge.svg)](https://github.com/SenteLabsAI/OpenExecutive/actions/workflows/ci.yml)
+[![CI](https://github.com/SuperSchramm/OpenInfoSec/actions/workflows/ci.yml/badge.svg)](https://github.com/SuperSchramm/OpenInfoSec/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
 
-An AI system that acts as your company's virtual executive team — a senior advisor with Harvard MBA-level knowledge, customized for your specific business.
+**A virtual security office for practicing the job of a CISO.**
 
-## Demo
+OpenInfoSec simulates the Office of the CISO — a Chief Information Security Officer, a Director of Cyber Operations, and a Director of Governance, Risk & Compliance — alongside the cross-functional business stakeholders a security leader works with every day: Finance, Legal, Operations, the board. It is built for practicing the actual job: justifying a security budget, framing risk for a board that doesn't think in CVEs, reasoning through a live incident, or mapping one control set across several frameworks.
 
-[![Open Executive demo video](https://img.youtube.com/vi/O_g97xxVTMk/maxresdefault.jpg)](https://youtu.be/O_g97xxVTMk)
+It is not a generic chatbot with a security-themed prompt. The security specialists retrieve from a curated security knowledge base, a library of security skills, and real-world failure case studies, and they are covered by their own eval scenarios (details under [What This Fork Adds](#what-this-fork-adds)).
 
-A walkthrough of Open Executive in action — [watch on YouTube](https://youtu.be/O_g97xxVTMk).
+## Origin and Credit
+
+OpenInfoSec is a fork of [OpenExecutive](https://github.com/SenteLabsAI/OpenExecutive), the open-source virtual C-suite orchestrator built by [sentelabs.ai](https://sentelabs.ai) and released under Apache 2.0. Credit for the foundation belongs to the upstream project: the orchestrator and routing loop, the specialist-agent framework, the ChromaDB RAG pipeline, episodic memory, the scheduler, prompt caching, the web UI, the chat integrations, and the deployment setup are all theirs. This fork keeps that engine, and the business specialists it shipped with, intact — a real CISO has to work *with* Finance, Legal, and the board, not in isolation from them. A snapshot of the original upstream README is kept in [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md).
+
+The fork currently still tracks upstream for infrastructure fixes and orchestration improvements. The longer-term intent is for OpenInfoSec to become narrower in focus and opinionated about security practice, maintained as its own codebase. Apache 2.0 attribution to the original project is preserved regardless of how far the two diverge.
 
 ## What It Does
 
-Developed by [sentelabs.ai](https://sentelabs.ai) Open Executive provides a single coherent executive voice backed by twelve specialist AI agents:
+You talk to a single executive. Behind it, specialist agents are consulted — in parallel for cross-domain questions — and their analysis is synthesized into one answer. The internal agent architecture is never exposed to the user.
 
-- **Chief Strategy Officer** — competitive analysis, M&A, market positioning, OKRs
-- **Chief Financial Officer** — financial modeling, fundraising, unit economics, cash flow
-- **Chief HR/People Officer** — hiring, compensation, performance, culture
-- **General Counsel** — contracts, IP, employment law basics, compliance
-- **Chief Operating Officer** — process design, vendor management, operational scaling
-- **Chief Marketing Officer** — GTM strategy, brand, communications, PR
-- **Chief Product Officer** — roadmap, prioritization, product strategy
-- **Board Communications Director** — board decks, investor relations, governance
+**The Security Office** (this fork's addition):
+
 - **Chief Information Security Officer** — security strategy, risk posture, board reporting, cross-domain security governance
 - **Director of Cyber Operations** — SOC/IR, threat detection, OT/ICS security, vulnerability management, incident response
 - **Director of Governance, Risk & Compliance** — framework mapping, audit prep, policy, regulatory compliance
-- **Head of Talent & Executive Search** — candidate screening & fit scoring, executive sourcing
 
-All twelve specialists — and the Executive orchestrator itself — run on Anthropic Claude models by default; see [Tech Stack](#tech-stack) below. All responses come from one consistent executive voice. The internal agent architecture is never exposed to the user. Beyond Q&A, the system maintains episodic memory of past decisions and initiatives across sessions, and a built-in scheduler can proactively surface follow-ups and time-sensitive actions.
+**The Business Office** (inherited from upstream, so security questions can draw on the surrounding business context): Chief Strategy Officer, Chief Financial Officer, Chief HR/People Officer, General Counsel, Chief Operating Officer, Chief Marketing Officer, Chief Product Officer, Board Communications Director, and Head of Talent & Executive Search.
+
+Beyond Q&A, the system keeps episodic memory of past decisions and initiatives across sessions, and a built-in scheduler can proactively surface follow-ups and time-sensitive actions. All agents and the Executive orchestrator run on Anthropic Claude models by default; see [Tech Stack](#tech-stack).
+
+## What This Fork Adds
+
+**Security specialists.** The CISO, Cyber Operations, and GRC agents are first-class specialists, wired through routing, the MCP server's specialist types, dispatch validation, and the knowledge-domain aliases (including GRC's own domain).
+
+**Security knowledge base** (`knowledge/builtin/security`, `compliance`, `governance`):
+- Framework references: NIST CSF 2.0, NIST SP 800-53, NIST AI RMF, MITRE ATT&CK, and MITRE ATLAS
+- PCI DSS v4.0.1 requirements, plus scoping and SAQ selection
+- A regulated-industry control-overlap reference and a cross-framework gap map
+- OT/ICS and AI-governance material: zero trust by Purdue level, a Level 6 cloud-tier extension to the Purdue model, an AI governance taxonomy, OT incident evidence, and a triage-by-consequence roadmap
+
+**Security skills.** Ten domain-gated skills, retrieved through `retrieve_skills()` when a specialist is consulted: incident containment and triage, incident escalation, vulnerability prioritization, applying threat intelligence, third-party vendor risk assessment, compliance gap vs. operational risk assessment, writing auditable policy and control language, board risk reporting, security investment prioritization, and CISO–GRC interoperability.
+
+**Failure case studies.** Five post-mortems the specialists can learn from: SolarWinds, Colonial Pipeline, MOVEit, Change Healthcare, and Equifax.
+
+**Routing that doesn't skip the experts.** On-topic questions force a specialist consult instead of leaving the orchestrator free to answer alone, the specialist name is validated at the dispatch boundary, and a log-only guard flags narration that claims a consult that never happened.
+
+**Evals.** Eight scenarios cover the CISO, Cyber Operations, GRC, and PCI DSS domains.
+
+**Hardening.** A set of security fixes, found through review and tracked as repo issues, across the inherited codebase:
+- Audit, decision, MCP, and briefing routes are restricted to the principal, and per-session routes check session ownership
+- Session IDs are shape-validated, closing a log-injection vector, and the unauthenticated debug endpoint was removed
+- Writes to the knowledge overlay are bounded and symlink-safe
+- Attachment uploads are isolated in their own ChromaDB collection with a retention policy, and Discord attachment ingest is gated on the roster check
+- Cross-company cache leaks and a store-swap race were closed
+- `BACKGROUND_JOBS_ENABLED` defaults to off, so an unattended local run can't drain API credits
+
+Org-wide documents such as incident response, business continuity, and disaster recovery plans are meant to be tagged `general` so every specialist can see their part of the plan (see [Choosing a domain](#choosing-a-domain)).
+
+> **Status:** active development. Planned work includes a [CISO Assistant](https://github.com/intuitem/ciso-assistant-community) integration for GRC. Treat all output as decision support for a qualified security professional, not a substitute for one.
+
+## Upstream Demo
+
+[![Open Executive demo video](https://img.youtube.com/vi/O_g97xxVTMk/maxresdefault.jpg)](https://youtu.be/O_g97xxVTMk)
+
+A walkthrough of the upstream OpenExecutive project — [watch on YouTube](https://youtu.be/O_g97xxVTMk).
 
 ## Architecture
 
@@ -39,7 +74,7 @@ User message
     ↓
 Executive Orchestrator (claude-sonnet-4-6)
     ↓ tool use → parallel specialist calls
-CSO / CFO / CHRO / GC / COO / CMO / CPO / Board / CISO / CyberOps / GRC / Talent
+CISO / CyberOps / GRC (security core)  +  CSO / CFO / CHRO / GC / COO / CMO / CPO / Board / Talent
     ↓ each specialist retrieves relevant context from ChromaDB
 Built-in MBA knowledge + Your company documents
     ↓
@@ -61,7 +96,7 @@ See [docs/architecture.md](docs/architecture.md) for an architecture overview an
 | Layer | Choice |
 |---|---|
 | LLM backbone | Anthropic Claude API |
-| Default model | `claude-sonnet-4-6` — Executive + all 12 specialists by default. Local/self-hosted models (Ollama, LM Studio, vLLM) are supported for dev cost reduction but are opt-in, not the default (see [Running on Local Models](#running-on-local-models)) |
+| Default model | `claude-sonnet-4-6` — Executive + all specialists by default. Local/self-hosted models (Ollama, LM Studio, vLLM) are supported for dev cost reduction but are opt-in, not the default (see [Running on Local Models](#running-on-local-models)) |
 | Deep reasoning | `claude-opus-4-7` for specialists needing extended thinking (CSO, CFO, GC, Board, Talent) — configurable via `DEEP_REASONING_MODEL` |
 | Backend | Python 3.11 + FastAPI |
 | Package manager | `uv` |
@@ -73,12 +108,12 @@ See [docs/architecture.md](docs/architecture.md) for an architecture overview an
 ## Repo Layout
 
 ```
-openexecutive/
+openinfosec/
 ├── packages/
 │   ├── core/
 │   │   └── openexecutive/
 │   │       ├── orchestrator/     # Executive persona + routing loop
-│   │       ├── agents/           # 8 specialist agents
+│   │       ├── agents/           # Specialist agents
 │   │       ├── knowledge/        # ChromaDB store + RAG pipeline
 │   │       ├── memory/           # Company profile + episodic memory
 │   │       ├── onboarding/       # Wizard state machine + profile builder
@@ -106,8 +141,8 @@ openexecutive/
 
 ```bash
 # Clone the repo
-git clone https://github.com/SenteLabsAI/OpenExecutive.git
-cd OpenExecutive
+git clone https://github.com/SuperSchramm/OpenInfoSec.git
+cd OpenInfoSec
 
 # Set your Anthropic API key
 cp .env.example .env
@@ -233,6 +268,8 @@ Tag a document with a specific domain only when it is genuinely one function's b
 
 ## Deployment (Fly.io)
 
+> **Forking note:** the Fly app names below (`openexec-*`) are inherited from upstream. Create and use your own app names (edit the `app =` line in each `fly.*.toml`) before deploying — you cannot deploy to apps you don't own.
+
 Two environments, each a separate set of Fly apps, driven by branch:
 
 | Environment | Trigger | Workflow | Apps |
@@ -345,13 +382,13 @@ See [.env.example](.env.example) for the full list.
 
 ## Running on Local Models
 
-A fresh clone runs the Executive and all 12 specialists on Claude out of the
+A fresh clone runs the Executive and all specialists on Claude out of the
 box — local models are **not** the default path. This section is for anyone
 who wants to swap some or all agents onto a local/self-hosted model, most
 commonly to cut cost during heavy local development (department-agent traffic
 can be meaningfully higher-volume than the Executive's own calls).
 
-Open Executive can run against any **OpenAI-compatible** local server — Ollama,
+OpenInfoSec can run against any **OpenAI-compatible** local server — Ollama,
 LM Studio, vLLM, or llama.cpp — instead of (or alongside) the Anthropic API.
 Local model slugs route to your server through the same provider abstraction the
 hosted models use; no agent or orchestrator code changes.
@@ -390,7 +427,7 @@ gateway) requires a bearer token; Ollama and LM Studio need none.
 3. Register in `packages/core/openexecutive/orchestrator/router.py` — add to `SPECIALIST_REGISTRY` and the `specialist` enum in `SPECIALIST_TOOLS`
 4. Add domain alias to `DOMAIN_ALIASES` in `packages/core/openexecutive/knowledge/retriever.py`
 5. Add knowledge docs to `knowledge/builtin/your_domain/`
-6. Add at least 2 eval scenarios to `evals/scenarios/`
+6. Add at least 2 eval scenarios (see [Evaluation System](#evaluation-system))
 7. Submit a PR — CI requires all of the above
 
 ## Development
@@ -408,7 +445,7 @@ pytest packages/core/tests/unit/ -v
 
 ## Evaluation System
 
-`evals/` contains 29 scenarios covering all 8 domains, scored by `claude-opus-4-7` as an LLM-as-judge. Each scenario defines a query, simulated company context, expected topics, required specialist routing, and a domain-specific rubric. Five scoring dimensions (persona coherence, domain accuracy, company context utilization, routing quality, actionability) are each rated 1–5. The CI gate requires ≥ 3.5/5 average; any dimension dropping > 10% vs `main` fails the PR.
+`evals/` holds the runner and judges; scenario definitions live in `packages/core/openexecutive/evals/_scenarios` and per-company fixtures under `fixtures/companies/*/scenarios`. Responses are scored by `claude-opus-4-7` as an LLM-as-judge. Each scenario defines a query, simulated company context, expected topics, required specialist routing, and a domain-specific rubric. Five scoring dimensions (persona coherence, domain accuracy, company context utilization, routing quality, actionability) are each rated 1–5. The CI gate requires ≥ 3.5/5 average; any dimension dropping > 10% vs `main` fails the PR.
 
 ## Privacy
 
@@ -423,4 +460,4 @@ See [.github/CONTRIBUTING.md](.github/CONTRIBUTING.md). All PRs must include:
 
 ## License
 
-Apache 2.0 — free to use commercially, requires attribution.
+Apache 2.0 — free to use commercially, requires attribution. OpenInfoSec is derived from [OpenExecutive](https://github.com/SenteLabsAI/OpenExecutive) by SenteLabs; see [LICENSE](LICENSE).
